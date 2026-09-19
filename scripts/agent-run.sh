@@ -17,6 +17,9 @@
 #   --shell      start bash instead of claude (to look around or log in)
 #
 # The project directory is the only host path the container sees.
+#
+# AGENT_RUN_EXTRA_ARGS="..."  extra `podman run` options, for example one more read-only
+#                             mount. Anything you add here can weaken the sandbox.
 set -euo pipefail
 
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
@@ -26,7 +29,7 @@ while [ $# -gt 0 ]; do
     --gpu) GPU=1 ;; --perf) PERF=1 ;; --gvisor) GVISOR=1 ;;
     --untrusted) UNTRUSTED=1 ;; --shell) SHELL_MODE=1 ;; --ask) ASK=1 ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -79,8 +82,11 @@ done
 PROXY_URL="http://$PROXY_IP:3128"
 
 # ---- assemble the agent container ------------------------------------------------------
+# A terminal only when there is one, so that headless use works from scripts and pipelines:
+#   agent-run.sh -- -p "summarise this repo" > out.txt
+if [ -t 0 ] && [ -t 1 ]; then TTY=(-it); else TTY=(-i); fi
 ARGS=(
-  --rm -it
+  --rm "${TTY[@]}"
   --name "agent-$(printf '%s' "$(basename "$PWD")" | tr -c 'a-zA-Z0-9_.-' '-')-$$"
   --network "$NET"                       # internal network: no route out except the proxy
   --dns none                             # no resolver at all: lookups fail at once, the proxy resolves
@@ -96,6 +102,8 @@ ARGS=(
   -e NO_PROXY=localhost,127.0.0.1
 )
 
+# shellcheck disable=SC2206  # word splitting is intended here
+[ -n "${AGENT_RUN_EXTRA_ARGS:-}" ] && ARGS+=( $AGENT_RUN_EXTRA_ARGS )
 [ "$GPU" = 1 ]    && ARGS+=( --device nvidia.com/gpu=all )
 [ "$GVISOR" = 1 ] && ARGS+=( --runtime=runsc )
 if [ "$PERF" = 1 ]; then

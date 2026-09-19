@@ -31,7 +31,7 @@ How to read the diagram:
 - **The project directory is the only host path mounted.** Your home directory, SSH keys and cloud credentials are not in the container.
 - **The GitHub token is attached only when you start the agent inside a checkout of the repository the token was made for.**
 
-### The five scripts
+### The scripts
 
 | Step | You run | You get |
 | --- | --- | --- |
@@ -274,7 +274,45 @@ The merge keeps your existing settings and unions lists. It sets:
 
 **Check it worked.** In a session, run `/status` and look for `Enterprise managed settings (file)` on the `Setting sources` line. Run `claude doctor` to see any setting it rejected. On the host, run `/sandbox` to confirm the mode.
 
-To confirm the container blocks repository hooks, put a harmless `SessionStart` hook (for example `touch /tmp/hook-ran`) and a `.mcp.json` in a scratch repository, start `agent-run.sh` there, and check that the file is not created and `/mcp` lists no servers. This has not been exercised yet.
+### Test that the sandbox blocks a repository's hooks and MCP servers
+
+Run this once after Stage 1, and again after you change `managed-settings.json` or update Claude Code. It needs a logged-in sandbox, and it sends two one-line prompts.
+
+```bash
+test-hook-blocking.sh
+```
+
+**What it does.** It builds a throwaway repository that tries to run code the way a malicious clone would, then runs one short headless Claude session in it, twice.
+
+| The repository contains | What it tries |
+| --- | --- |
+| `.claude/settings.json` with `SessionStart`, `UserPromptSubmit` and `Stop` hooks | Each hook runs `touch /workspace/MARKER_hook_<name>` |
+| `.mcp.json` with a server named `probe`, plus `"enableAllProjectMcpServers": true` to pre-approve it | The server command runs `touch /workspace/MARKER_mcp_server_started` |
+
+The payloads are harmless: each one only creates an empty marker file in the throwaway project directory, where the script can see it from the host. The directory is deleted afterwards.
+
+| Run | Setup | Expected |
+| --- | --- | --- |
+| 1. Control | The image's managed settings are replaced by `{}` for this one run | The markers appear. This proves the test can see a hook or an MCP server when one runs. Without it, "no markers" could just mean the test was broken |
+| 2. Real | The sandbox as shipped | No marker appears |
+
+The session is headless (`claude -p`) on purpose. That is the hardest case: it never shows the workspace trust dialog, so project hooks are used and `.mcp.json` servers connect without asking.
+
+**Expected output.**
+
+```text
+1. CONTROL run, managed settings replaced by {} (markers expected)
+   ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started
+2. REAL run, sandbox as shipped (no marker allowed)
+   ran: nothing
+
+PASS: without managed settings the repository ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started
+      with the sandbox as shipped it ran nothing.
+```
+
+`FAIL` means the sandbox let the repository run something; do not use it on untrusted code until you know why. `INCONCLUSIVE` means nothing ran even in the control, usually because the sandbox is not logged in.
+
+The control run is also a fair picture of what a hostile repository can do to a headless session with no managed settings: all three hooks and the MCP server ran, with no prompt of any kind.
 
 ## Daily use
 
@@ -288,6 +326,7 @@ agent-run.sh --gpu              # CUDA work
 agent-run.sh --gpu --perf       # CUDA plus hardware perf counters
 agent-run.sh --shell            # bash in the container instead of claude, to look around
 agent-run.sh -- --resume        # everything after -- is passed to claude
+agent-run.sh -- -p "summarise this repo" > summary.txt   # headless; works from scripts and pipelines
 ```
 
 | Flag | Adds | Cost |
@@ -299,6 +338,8 @@ agent-run.sh -- --resume        # everything after -- is passed to claude
 | `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries, always manual permission mode |
 | `--shell` | bash instead of claude | |
 | `--gvisor` | `--runtime=runsc`. Experimental | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Appendix A](#the-gpu-trade-off) |
+
+`AGENT_RUN_EXTRA_ARGS` adds options to the `podman run` command, for example one more read-only mount: `AGENT_RUN_EXTRA_ARGS="-v $HOME/datasets:/data:ro" agent-run.sh`. Anything you add can weaken the sandbox, so keep mounts read-only and narrow.
 
 **Every run gets:** no Linux capabilities, `no-new-privileges`, a limit of 2048 processes and 16 GB of memory, a tmpfs `/tmp`, and your host user mapped to the container's `agent` user so files in the project keep your ownership. Claude's login and history live in the `agent-claude-home` volume, not in the project.
 
@@ -590,6 +631,7 @@ Everything is in [`scripts/`](../scripts/). Put that directory on your `PATH`.
 | [`03-claude-settings.sh`](../scripts/03-claude-settings.sh) | Stage 3, host side: merge hardening into `~/.claude/settings.json`; `--managed` installs host managed settings |
 | [`agent-run.sh`](../scripts/agent-run.sh) | Daily launcher: `--gpu`, `--perf`, `--gvisor`, `--untrusted`, `--shell` |
 | [`inspect-repo.sh`](../scripts/inspect-repo.sh) | Clone without executing anything and flag what the repo would auto-run |
+| [`test-hook-blocking.sh`](../scripts/test-hook-blocking.sh) | Prove, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
 | [`container/Containerfile.agent`](../scripts/container/Containerfile.agent) | Agent image: Claude Code, git, gh, Python, build tools, non-root user |
 | [`container/Containerfile.proxy`](../scripts/container/Containerfile.proxy) | Egress proxy image (Squid) |
 | [`container/squid.conf`](../scripts/container/squid.conf) | Proxy rules: HTTPS CONNECT to allowlisted domains only |
@@ -614,7 +656,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
 | `--gvisor` | **Not run.** gVisor is not installed |
 | Claude Code itself inside the container | A logged-in session works through the proxy, interactively and headless (`-p`). Confirmed: trusted sessions start in auto mode, `--ask` starts in manual mode |
-| Managed settings blocking hooks and MCP servers | Follows Anthropic's docs. **Not exercised.** Stage 3 says how to check it |
+| Managed settings blocking hooks and MCP servers | Confirmed with `test-hook-blocking.sh`. Control run (managed settings removed): three hooks and the MCP server ran. Sandbox as shipped: nothing ran. Trusted mode only; untrusted mode adds `--setting-sources user` on top and was not tested separately. The session also reported claude.ai connectors as blocked by the MCP allowlist |
 | `02-github-single-repo.sh` | **Not run against GitHub.** URL parameters, permission names and ruleset fields checked against GitHub's docs. Option handling tested |
 | `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
