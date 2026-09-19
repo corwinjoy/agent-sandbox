@@ -18,7 +18,8 @@ Early and partly tested. Read this before relying on it.
 | `01-setup-podman.sh` | Run once on Ubuntu 24.04 with Podman 4.9.3. Three bugs found and fixed; not yet re-run from scratch |
 | `agent-run.sh` | Trusted and untrusted modes confirmed under Podman: file ownership, no capabilities, allowlist, no direct route, no DNS. `--perf` and `--gpu --perf` confirmed |
 | `--gpu` | Confirmed: a CUDA kernel compiled and ran on the GPU inside the container. Needed a compatible CDI spec on Podman 4.9, which the setup script now installs |
-| Claude Code logged in inside the container; managed settings blocking hooks and MCP servers | **Not exercised** |
+| Claude Code logged in inside the container | Confirmed, including auto mode by default and `--ask` for manual |
+| Managed settings blocking hooks and MCP servers | **Not exercised** |
 | `02-github-single-repo.sh` | **Not yet run against GitHub** |
 | `03-claude-settings.sh`, `inspect-repo.sh` | Tested against sample inputs |
 
@@ -58,7 +59,7 @@ cd untrusted/project && agent-run.sh --untrusted           # no token, no GPU, m
 | [`scripts/01-setup-podman.sh`](scripts/01-setup-podman.sh) | Host checks, Podman install, NVIDIA CDI spec, perf seccomp profile, images, internal networks |
 | [`scripts/02-github-single-repo.sh`](scripts/02-github-single-repo.sh) | Fine-grained token for one repo (read, commit, push, comment), verified and stored as a Podman secret |
 | [`scripts/03-claude-settings.sh`](scripts/03-claude-settings.sh) | Merges sandbox and credential hardening into `~/.claude/settings.json` |
-| [`scripts/agent-run.sh`](scripts/agent-run.sh) | Launcher: `--gpu`, `--perf`, `--untrusted`, `--shell`, and an experimental CPU-only `--gvisor` |
+| [`scripts/agent-run.sh`](scripts/agent-run.sh) | Launcher. Trusted sessions start in auto permission mode, untrusted ones in manual. Flags: `--gpu`, `--perf`, `--ask`, `--untrusted`, `--shell`, and an experimental CPU-only `--gvisor` |
 | [`scripts/inspect-repo.sh`](scripts/inspect-repo.sh) | Reviews a repository's agent config, editor tasks and install scripts before anything opens it |
 | [`scripts/container/`](scripts/container/) | Containerfiles, Squid config, domain allowlists, git config, Claude Code managed settings |
 

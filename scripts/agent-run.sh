@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
 # Launch Claude Code inside the rootless Podman sandbox, on the current directory.
 #
-#   agent-run.sh [--gpu] [--perf] [--gvisor] [--untrusted] [--shell] [-- claude args...]
+#   agent-run.sh [--gpu] [--perf] [--ask] [--untrusted] [--shell] [--gvisor] [-- claude args...]
 #
 #   --gpu        expose the NVIDIA GPU through CDI (adds the NVIDIA driver to the attack surface)
 #   --perf       allow perf_event_open so `perf stat` sees hardware counters
 #   --gvisor     EXPERIMENTAL: run under gVisor (runsc installed and registered with Podman).
 #                CPU only: no --gpu (rootless gVisor GPU support is broken upstream), no --perf
+#   --ask        start Claude Code in manual permission mode (it asks before each action).
+#                The default in the sandbox is auto mode: a safety classifier approves routine
+#                actions, and the container is the backstop. Managed deny and ask rules
+#                (no merge, prompt on force-push) apply in both modes.
 #   --untrusted  for repos you have not reviewed: no GitHub token, no GPU, model-API-only
-#                network, separate Claude state, project hooks/MCP/skills not loaded
+#                network, separate Claude state, project hooks/MCP/skills not loaded,
+#                and always manual permission mode
 #   --shell      start bash instead of claude (to look around or log in)
 #
 # The project directory is the only host path the container sees.
 set -euo pipefail
 
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
-GPU=0 PERF=0 GVISOR=0 UNTRUSTED=0 SHELL_MODE=0
+GPU=0 PERF=0 GVISOR=0 UNTRUSTED=0 SHELL_MODE=0 ASK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) GPU=1 ;; --perf) PERF=1 ;; --gvisor) GVISOR=1 ;;
-    --untrusted) UNTRUSTED=1 ;; --shell) SHELL_MODE=1 ;;
+    --untrusted) UNTRUSTED=1 ;; --shell) SHELL_MODE=1 ;; --ask) ASK=1 ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -111,12 +116,22 @@ if [ "$UNTRUSTED" = 0 ] && ORIGIN="$(git -C "$PWD" remote get-url origin 2>/dev/
   fi
 fi
 
+# Permission mode. The launcher sets it per trust level instead of relying on a settings file,
+# because trusted and untrusted sessions keep their settings in different volumes. It comes
+# first on the command line, so a --permission-mode you pass after -- takes precedence.
+#   trusted:   auto. Fewer prompts; the container, the proxy and the single-repo token limit
+#              what a wrongly approved action can do.
+#   untrusted: manual. Unreviewed code is where prompt injection is likeliest, and a
+#              classifier judges whether an action fits the request, which is what an
+#              injection attacks.
+if [ "$UNTRUSTED" = 1 ] || [ "$ASK" = 1 ]; then MODE=manual; else MODE=auto; fi
+
 if [ "$SHELL_MODE" = 1 ]; then
   exec podman run "${ARGS[@]}" --entrypoint /bin/bash localhost/agent-claude
 elif [ "$UNTRUSTED" = 1 ]; then
   # --setting-sources user: do not read the repo's .claude/settings*.json or .mcp.json.
   # Managed settings in the image already block hooks and MCP servers from every source.
-  exec podman run "${ARGS[@]}" localhost/agent-claude --setting-sources user "$@"
+  exec podman run "${ARGS[@]}" localhost/agent-claude --permission-mode "$MODE" --setting-sources user "$@"
 else
-  exec podman run "${ARGS[@]}" localhost/agent-claude "$@"
+  exec podman run "${ARGS[@]}" localhost/agent-claude --permission-mode "$MODE" "$@"
 fi

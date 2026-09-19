@@ -38,7 +38,7 @@ How to read the diagram:
 | Stage 1. Podman | `01-setup-podman.sh` | Rootless Podman, GPU access through CDI, the agent image, the proxy image, two internal networks |
 | Stage 2. GitHub | `02-github-single-repo.sh OWNER/REPO` | A token for that repository only: read, commit, push, comment. Stored as a Podman secret |
 | Stage 3. Claude Code settings | Nothing for the container. `03-claude-settings.sh` for the host | In the container: repo hooks and MCP servers blocked, merge denied, force-push gated. On the host: secrets unreadable to the agent |
-| Daily use | `agent-run.sh [--gpu] [--perf]` | Claude Code on the current directory, inside the sandbox |
+| Daily use | `agent-run.sh [--gpu] [--perf]` | Claude Code on the current directory, inside the sandbox, in auto permission mode |
 | New untrusted repo | `inspect-repo.sh URL`, then `agent-run.sh --untrusted` | A review of what the repo would auto-run, then a session with no token, no GPU and model-API-only network |
 
 ### Quick path
@@ -282,7 +282,8 @@ Start the agent from the project directory. That directory is the only host path
 
 ```bash
 cd ~/src/myrepo
-agent-run.sh                    # normal session. The first run asks you to log in; the login is kept
+agent-run.sh                    # normal session, auto permission mode. The first run asks you to log in; the login is kept
+agent-run.sh --ask              # same, but Claude asks before each action (manual permission mode)
 agent-run.sh --gpu              # CUDA work
 agent-run.sh --gpu --perf       # CUDA plus hardware perf counters
 agent-run.sh --shell            # bash in the container instead of claude, to look around
@@ -291,14 +292,25 @@ agent-run.sh -- --resume        # everything after -- is passed to claude
 
 | Flag | Adds | Cost |
 | --- | --- | --- |
-| none | Project mounted read-write, proxy-only network, the GitHub token if one exists for this checkout's `origin` | |
+| none | Project mounted read-write, proxy-only network, the GitHub token if one exists for this checkout's `origin`, auto permission mode | See [Permission mode](#permission-mode) below |
+| `--ask` | Manual permission mode: Claude asks before each action | More prompts |
 | `--gpu` | `--device nvidia.com/gpu=all` | Code in the container can send raw ioctls to the host NVIDIA driver. Use it only when the task needs CUDA |
 | `--perf` | The seccomp profile that allows `perf_event_open` | That syscall can leak some host information, which is why it is blocked by default. The host also needs `kernel.perf_event_paranoid` at 2 or lower |
-| `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries |
+| `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries, always manual permission mode |
 | `--shell` | bash instead of claude | |
 | `--gvisor` | `--runtime=runsc`. Experimental | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Appendix A](#the-gpu-trade-off) |
 
 **Every run gets:** no Linux capabilities, `no-new-privileges`, a limit of 2048 processes and 16 GB of memory, a tmpfs `/tmp`, and your host user mapped to the container's `agent` user so files in the project keep your ownership. Claude's login and history live in the `agent-claude-home` volume, not in the project.
+
+### Permission mode
+
+The launcher starts Claude Code in **auto mode** for trusted sessions: a safety classifier approves routine actions instead of prompting you for each one. Anthropic describes the classifier as "a per-action control, not an isolation boundary", which is why it is the default only here, where the container, the proxy and the single-repo token limit what a wrongly approved action can do. Fewer prompts also means the ones you do see get read.
+
+- The managed rules from Stage 3 still hold in auto mode. Deny rules are evaluated first in every mode, so `gh pr merge` stays blocked, and Anthropic's docs say an ask rule still prompts "even in auto mode", so a force-push still asks you.
+- Two things are outside the container's protection, and in auto mode the classifier is the main per-action check on them: pushes and comments made with the GitHub token, and edits to files in the project. Add the branch ruleset in Stage 2, and review the diff before you run anything from the project on the host.
+- `--untrusted` always uses manual mode. Unreviewed code is where prompt injection is likeliest, and a classifier judges whether an action fits the request, which is exactly what an injection attacks.
+- The launcher passes `--permission-mode`, so the mode does not depend on a settings file inside the container. A `--permission-mode` you pass after `--` takes precedence. If auto mode is not available on your account, Claude Code falls back to prompting.
+- This applies inside the sandbox only. Do not make auto mode the default in your host `~/.claude/settings.json`: on the host, hooks and MCP servers run outside any boundary.
 
 **What feels different from running `claude` on the host.**
 
@@ -357,6 +369,7 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
    | Separate network and proxy, using `allowed-domains-untrusted.txt`: Anthropic endpoints only | No GitHub, no registries, so nowhere to send data |
    | Separate `agent-claude-home-untrusted` volume | Nothing the repository writes into Claude's state can affect later trusted sessions |
    | `claude --setting-sources user` | The repository's `.claude/settings*.json` and `.mcp.json` are not read at all |
+   | Manual permission mode | Claude asks before each action. See [Permission mode](#permission-mode) |
    | Managed settings, as always | Hooks and MCP servers from any source stay blocked |
 
 4. **Install dependencies with scripts off.** Add the one registry you need to `~/.config/agent-sandbox/allowed-domains-untrusted.txt` and restart the proxy with `podman rm -f agent-proxy-untrusted`. Install with `npm ci --ignore-scripts`, or `pip install --only-binary=:all:` so that no `setup.py` runs. Then remove the registry again.
@@ -600,7 +613,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | `--perf` | Confirmed: counters blocked without the flag, real `cycles`, `instructions` and `cache-misses` with it |
 | `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
 | `--gvisor` | **Not run.** gVisor is not installed |
-| Claude Code itself inside the container | `claude --version` and `claude doctor` work. **No logged-in session has been run yet** |
+| Claude Code itself inside the container | A logged-in session works through the proxy, interactively and headless (`-p`). Confirmed: trusted sessions start in auto mode, `--ask` starts in manual mode |
 | Managed settings blocking hooks and MCP servers | Follows Anthropic's docs. **Not exercised.** Stage 3 says how to check it |
 | `02-github-single-repo.sh` | **Not run against GitHub.** URL parameters, permission names and ruleset fields checked against GitHub's docs. Option handling tested |
 | `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |
