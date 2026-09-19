@@ -10,14 +10,19 @@
 #   4. If an NVIDIA GPU is present: generates the CDI spec so containers can request it.
 #   5. Writes a seccomp profile that also allows perf_event_open (for --perf runs).
 #   6. Builds the agent image and the egress-proxy image.
-#   7. Creates the two internal (no-route-out) networks.
+#   7. Creates the two internal (no-route-out, no-DNS) networks.
+#   8. Checks that Podman can resolve the GPU, and installs a compatible CDI spec if not.
 #
 # Safe to re-run. Uses sudo only for apt and for writing /etc/cdi.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
-BASE_IMAGE="${BASE_IMAGE:-docker.io/library/ubuntu:24.04}"   # override for a CUDA base image
+# Base image for the agent. Set BASE_IMAGE once (for example to a CUDA image); the choice is
+# remembered in $CFG_DIR/base-image so that a plain re-run rebuilds on the same base.
+mkdir -p "$CFG_DIR"
+BASE_IMAGE="${BASE_IMAGE:-$(cat "$CFG_DIR/base-image" 2>/dev/null || echo docker.io/library/ubuntu:24.04)}"
+echo "$BASE_IMAGE" > "$CFG_DIR/base-image"
 
 say()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '  [WARN] %s\n' "$*" >&2; }
@@ -109,9 +114,13 @@ say "Writing a seccomp profile that allows perf_event_open"
 mkdir -p "$CFG_DIR"
 SECCOMP_SRC=/usr/share/containers/seccomp.json
 if [ -r "$SECCOMP_SRC" ]; then
-  # Start from Podman's default profile and add one unconditional allow rule.
+  # Start from Podman's default profile. It names perf_event_open in an explicit deny rule
+  # (for containers without CAP_SYS_ADMIN), and a deny beats an allow for the same syscall,
+  # so take it out of that rule and then add an unconditional allow.
   # Used only when you pass --perf to agent-run.sh.
-  jq '.syscalls += [{"names":["perf_event_open"],"action":"SCMP_ACT_ALLOW"}]' \
+  jq '.syscalls |= map(if .action == "SCMP_ACT_ERRNO" and (.names | index("perf_event_open"))
+                       then .names -= ["perf_event_open"] else . end)
+      | .syscalls += [{"names":["perf_event_open"],"action":"SCMP_ACT_ALLOW"}]' \
      "$SECCOMP_SRC" > "$CFG_DIR/seccomp-perf.json"
   ok "$CFG_DIR/seccomp-perf.json"
 else
@@ -134,11 +143,39 @@ podman build -t localhost/agent-claude -f "$HERE/container/Containerfile.agent" 
 
 # ---------------------------------------------------------------- 7. networks
 say "Creating internal networks"
-# --internal: containers on these networks have no route to the outside.
-# Their only way out is the proxy container, which is also attached to the default network.
+# --internal: containers on these networks have no route to the outside. Their only way out
+# is the proxy container, which is also attached to the default network.
+# --disable-dns: Podman's DNS on an internal network still forwards outside names on some
+# versions (seen with aardvark-dns 1.4), which would be a channel for leaking data. With DNS
+# off, the agent resolves nothing and reaches the proxy by IP address.
 for net in agent-internal agent-untrusted; do
-  podman network exists "$net" || podman network create --internal "$net" >/dev/null
+  if podman network exists "$net" && [ "$(podman network inspect "$net" --format '{{.DNSEnabled}}')" = true ]; then
+    warn "network $net was created with DNS enabled; recreating it"
+    podman rm -f agent-proxy agent-proxy-untrusted >/dev/null 2>&1 || true
+    podman network rm -f "$net" >/dev/null
+  fi
+  podman network exists "$net" || podman network create --internal --disable-dns "$net" >/dev/null
   ok "network $net"
 done
+
+# ---------------------------------------------------------------- 8. GPU check
+# Older Podman releases (4.9 among them) reject CDI specs written by NVIDIA Container Toolkit
+# 1.18+ with: unknown field "additionalGids". That field only adds the video/render groups
+# for /dev/dri, which CUDA does not need, so fall back to a spec without it.
+if [ -r /etc/cdi/nvidia.yaml ]; then
+  say "Checking that Podman can resolve the GPU"
+  gpu_probe() { podman run --rm --device nvidia.com/gpu=all --entrypoint /bin/true localhost/agent-proxy >/dev/null 2>&1; }
+  if gpu_probe; then ok "nvidia.com/gpu=all resolves"
+  else
+    warn "Podman cannot use the CDI spec as generated; installing a compatible copy"
+    awk '/^[[:space:]]*additionalGids:/{skip=1; next}
+         skip && /^[[:space:]]*-[[:space:]]*[0-9]+[[:space:]]*$/{next}
+         {skip=0; print}' /etc/cdi/nvidia.yaml \
+      | sed 's/^cdiVersion: .*/cdiVersion: 0.6.0/' > "$CFG_DIR/nvidia-cdi-compat.yaml"
+    sudo install -m 0644 "$CFG_DIR/nvidia-cdi-compat.yaml" /etc/cdi/nvidia.yaml
+    gpu_probe && ok "nvidia.com/gpu=all resolves with the compatible spec" \
+      || warn "Still unresolvable. See: podman --log-level=debug run --rm --device nvidia.com/gpu=all localhost/agent-proxy true 2>&1 | grep -i cdi"
+  fi
+fi
 
 say "Done. Next: 02-github-single-repo.sh OWNER/REPO, then agent-run.sh from a project directory."

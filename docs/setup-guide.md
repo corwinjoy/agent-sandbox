@@ -2,7 +2,7 @@
 
 Last updated 2026-09-18
 
-> **Status: partly tested.** The Podman setup script, the launcher and the GitHub script have not yet been run end to end. [Test status](#test-status) lists exactly what was and was not checked. Try this on a scratch machine and a scratch repository first.
+> **Status: partly tested.** Stage 1 and the launcher have been run on one machine (Ubuntu 24.04, Podman 4.9.3). The GitHub script and the blocking of repository hooks and MCP servers have not been exercised yet. [Test status](#test-status) lists exactly what was and was not checked. Try this on a scratch repository first.
 
 ## Overview
 
@@ -26,7 +26,7 @@ flowchart LR
 
 How to read the diagram:
 
-- **The agent container has no route to the internet.** Its network is created with `--internal`. DNS on that network answers only container names, so the agent cannot even look up an outside host.
+- **The agent container has no route to the internet.** Its network is created with `--internal` and with DNS switched off, so the agent cannot even look up an outside host. It reaches the proxy by IP address.
 - **The proxy container is the only way out.** It allows HTTPS to the domains in an allowlist file and refuses everything else. The agent cannot change it, because it runs in a different container.
 - **The project directory is the only host path mounted.** Your home directory, SSH keys and cloud credentials are not in the container.
 - **The GitHub token is attached only when you start the agent inside a checkout of the repository the token was made for.**
@@ -106,7 +106,7 @@ Each one lets code running as you skip the sandbox entirely. `01-setup-podman.sh
 01-setup-podman.sh
 ```
 
-If you need the CUDA toolkit (`nvcc`, headers) inside the container, build on a CUDA base image instead of plain Ubuntu. The NVIDIA driver libraries are injected at run time either way.
+If you need the CUDA toolkit (`nvcc`, headers) inside the container, build on a CUDA base image instead of plain Ubuntu. The NVIDIA driver libraries are injected at run time either way. The choice is remembered in `~/.config/agent-sandbox/base-image`, so later plain re-runs rebuild on the same base. The CUDA image is about 8 GB.
 
 ```bash
 BASE_IMAGE=docker.io/nvidia/cuda:12.6.3-devel-ubuntu24.04 01-setup-podman.sh
@@ -120,12 +120,12 @@ The script is safe to re-run. It uses `sudo` only for `apt` and for writing `/et
 | --- | --- |
 | `podman`, `uidmap`, `passt`, `slirp4netns`, `crun` | Rootless containers and their networking. `crun` is Podman's low-level runtime. Keep it updated through apt like any other package |
 | `/etc/subuid`, `/etc/subgid` entries | The id ranges user namespaces need. Added only where missing, in a range no other user has |
-| `/etc/cdi/nvidia.yaml` | Lets a container request the GPU with `--device nvidia.com/gpu=all`. Regenerate it after each driver update by re-running the script |
-| `~/.config/agent-sandbox/seccomp-perf.json` | Podman's default seccomp profile plus `perf_event_open`. Used only with `--perf` |
+| `/etc/cdi/nvidia.yaml` | Lets a container request the GPU with `--device nvidia.com/gpu=all`. Regenerate it after each driver update by re-running the script. If your Podman cannot read the spec that the NVIDIA toolkit writes, the script installs a compatible copy; see [Troubleshooting](#troubleshooting) |
+| `~/.config/agent-sandbox/seccomp-perf.json` | Podman's default seccomp profile with `perf_event_open` moved from its deny rule to an allow rule. Used only with `--perf` |
 | `~/.config/agent-sandbox/allowed-domains*.txt` | The egress allowlists. Your copies; the script never overwrites them |
 | `localhost/agent-claude` image | Ubuntu, Claude Code, git, gh, Python, build tools, perf, the non-root user `agent`, managed settings, git config |
 | `localhost/agent-proxy` image | Squid. Allows HTTPS CONNECT to allowlisted domains only |
-| `agent-internal`, `agent-untrusted` networks | Created with `--internal`: no route to the outside |
+| `agent-internal`, `agent-untrusted` networks | Created with `--internal --disable-dns`: no route to the outside and no name resolution |
 
 **The script:** [`scripts/01-setup-podman.sh`](../scripts/01-setup-podman.sh), commented step by step. The container build files it uses are in [`scripts/container/`](../scripts/container/).
 
@@ -373,8 +373,9 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
 | --- | --- | --- |
 | A tool cannot reach a site, or `CONNECT tunnel failed, response 403` | The domain is not on the allowlist | Find the `TCP_DENIED` line in the proxy log, add the domain, `podman rm -f agent-proxy` |
 | Every outside domain fails, even allowlisted ones | The proxy cannot resolve names. It uses the DNS servers in `~/.config/agent-sandbox/squid-dns.conf`, which the launcher writes from the host's resolvers | Put resolvers that work from your network on the `dns_nameservers` line, then `podman rm -f agent-proxy` |
-| `Could not resolve proxy: agent-proxy` | The proxy container is not running, or the network backend is not netavark | `podman ps -a`, `podman logs agent-proxy`, and `podman info --format '{{.Host.NetworkBackend}}'` |
-| Containers fail at start with `operation not permitted` | Seen with Docker and `no-new-privileges` on the authoring machine. Not yet seen with Podman | Remove `--security-opt=no-new-privileges` in `agent-run.sh` to confirm, and please report it |
+| `could not find the proxy's address`, or every request times out | The proxy container is not running | `podman ps -a` and `podman logs agent-proxy`. Remove it with `podman rm -f agent-proxy` and start `agent-run.sh` again |
+| `getent hosts` or `ping` cannot resolve anything inside the container | Expected. DNS is off on purpose; programs reach the network through the proxy, which does the lookups | Make sure the tool honours `HTTPS_PROXY` |
+| `Error: setting up CDI devices: unresolvable CDI devices nvidia.com/gpu=all` | Podman cannot parse the CDI spec. Seen with Podman 4.9.3 and NVIDIA Container Toolkit 1.20: the toolkit writes an `additionalGids` field that the older parser rejects. `podman --log-level=debug run ... 2>&1 \| grep -i cdi` shows `unknown field "additionalGids"` | Re-run `01-setup-podman.sh`. Its last step detects this and installs a copy of the spec without that field, which CUDA does not need |
 | `nvidia-smi` fails inside the container | CDI spec missing or stale after a driver update | Re-run `01-setup-podman.sh`, then check `nvidia-ctk cdi list` |
 | `perf stat` shows `<not supported>` or permission denied | `--perf` not passed, or `kernel.perf_event_paranoid` above 2 on the host | Pass `--perf`. On the host: `sudo sysctl kernel.perf_event_paranoid=2` |
 | Files in the project end up owned by a strange uid | Podman older than 4.3, so `--userns=keep-id:uid=...` was not honoured | Upgrade Podman |
@@ -421,7 +422,7 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 | Flag in `agent-run.sh` | Stops |
 | --- | --- |
 | Rootless, `--userns=keep-id` | Root in the container is not root on the host. Project files keep your ownership |
-| `--network agent-internal` plus the proxy | Exfiltration to arbitrary hosts, reverse shells and DNS tunnelling. On an internal network Podman's DNS [answers only container names](https://docs.podman.io/en/latest/markdown/podman-network-create.1.html) and returns NXDOMAIN for the rest. The agent cannot remove the rule, because it is enforced in another container |
+| `--network agent-internal` plus the proxy, `--dns none` | Exfiltration to arbitrary hosts, reverse shells and DNS tunnelling. The agent cannot remove the rule, because it is enforced in another container |
 | `--cap-drop=ALL`, `no-new-privileges` | Raw sockets, mounts, ptrace of other users' processes, setuid escalation |
 | Only `$PWD` mounted | Reading `~/.ssh`, cloud credentials, browser profiles, other projects |
 | `--pids-limit`, `--memory` | Fork bombs and memory exhaustion |
@@ -444,15 +445,19 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 
 ### Perf counters
 
-Docker's default seccomp profile [blocks `perf_event_open`](https://docs.docker.com/engine/security/seccomp/) as a host information leak, and Podman's default derives from it. `--perf` swaps in a copy of Podman's profile with that one syscall allowed. The host also needs `kernel.perf_event_paranoid` at 2 or lower; Ubuntu's default is higher. On the authoring machine, `perf stat` inside a bubblewrap sandbox returned real hardware counters; the same through Podman with this profile is not yet tested.
+Docker's default seccomp profile [blocks `perf_event_open`](https://docs.docker.com/engine/security/seccomp/) as a host information leak, and Podman's default derives from it. `--perf` swaps in a copy of Podman's profile with that one syscall allowed. Appending an allow rule is not enough, because the default profile also lists the syscall in an explicit deny rule and the deny wins; the setup script removes it from that rule. The host also needs `kernel.perf_event_paranoid` at 2 or lower; Ubuntu's default is higher. On the test machine, `perf stat -e cycles,instructions,cache-misses` inside the container failed without `--perf` and returned real hardware counters with it.
 
 ### What NVIDIA's AI red team asks of any agent sandbox
 
 [Their January 2026 guidance](https://developer.nvidia.com/blog/practical-security-guidance-for-sandboxing-agentic-workflows-and-managing-execution-risk/) lists three mandatory controls: an egress allowlist, no writes outside the workspace, and no writes to agent config, hooks or MCP config. This setup meets the first two. For the third, managed settings make repo-written hooks and MCP config inert, but the agent can still edit `CLAUDE.md` in the project. They also recommend VMs over shared-kernel sandboxes, injected short-lived secrets, and recreating sandboxes regularly.
 
-### How the proxy resolves names
+### DNS is switched off for the agent
 
-The proxy container sits on the internal network too, so the DNS server Podman gives it would refuse outside names. Squid therefore does its own lookups with the servers in `~/.config/agent-sandbox/squid-dns.conf`. `agent-run.sh` writes that file each time it starts the proxy, from the host's upstream resolvers (`/run/systemd/resolve/resolv.conf`, then `/etc/resolv.conf`, skipping loopback addresses), and falls back to `1.1.1.1` and `9.9.9.9`. This was tested under Docker, not yet under Podman.
+Current Podman documentation says that DNS on an `--internal` network [answers only container names](https://docs.podman.io/en/latest/markdown/podman-network-create.1.html). On the test machine (Podman 4.9.3, aardvark-dns 1.4.0) it did not: a container on the internal network resolved `example.com`. A resolver that forwards outside names is a slow but real channel for leaking data, so the setup does not depend on the Podman version:
+
+- The networks are created with `--disable-dns`, and the agent container runs with `--dns none`, so lookups fail at once.
+- The launcher reads the proxy's IP address on the internal network and passes it in `HTTPS_PROXY`. Programs hand the host name to the proxy, and the proxy resolves it.
+- Squid does its own lookups with the servers in `~/.config/agent-sandbox/squid-dns.conf`. `agent-run.sh` writes that file each time it starts the proxy, from the host's upstream resolvers (`/run/systemd/resolve/resolv.conf`, then `/etc/resolv.conf`, skipping loopback addresses), and falls back to `1.1.1.1` and `9.9.9.9`.
 
 ### Known rough edges
 
@@ -586,20 +591,20 @@ The pattern scan in `inspect-repo.sh` is a net for careless attacks. It will not
 
 ## Test status
 
-Checked on the authoring machine: Ubuntu 24.04, Docker 27.2, Claude Code 2.1.277, no Podman installed.
+Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aardvark-dns 1.4.0, crun), NVIDIA driver 580, NVIDIA Container Toolkit 1.20.1, Claude Code 2.1.278 in the image.
 
 | Piece | Status |
 | --- | --- |
-| All scripts | Pass `bash -n` |
-| `01-setup-podman.sh` | **Not run** |
-| `agent-run.sh` | **Not run under Podman.** Dry-run against a stub `podman` to check the commands it builds for trusted, GPU, perf and untrusted modes |
-| `02-github-single-repo.sh` | **Not run against GitHub.** URL parameters, permission names and ruleset fields checked against GitHub's docs |
-| Agent image | Builds and runs under Docker. Claude Code installs, `claude doctor` reports no settings problems, `perf --version` works, the git credential helper returns the token |
-| Proxy | Tested under Docker: allowlisted domains connect, `example.com` gets 403, plain HTTP gets 403, a container on the internal network has no direct route, the DNS include is parsed |
-| `03-claude-settings.sh` | Merge tested against a sample settings file |
-| `inspect-repo.sh` | Tested against a fabricated hostile repository (all 8 planted items flagged) and a clean one (0 flags, clean exit) |
+| `01-setup-podman.sh` | Run once with a CUDA base image. Podman, both images, both networks and the CDI spec were created. The run exposed three bugs, now fixed: the CDI spec was unreadable by Podman 4.9, internal-network DNS forwarded outside names, and the perf seccomp profile had no effect. The fixed steps were applied by hand afterwards; the script has not been re-run from scratch |
+| `agent-run.sh`, trusted and untrusted modes | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets 403, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
+| `--perf` | Confirmed: counters blocked without the flag, real `cycles`, `instructions` and `cache-misses` with it |
+| `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
+| `--gvisor` | **Not run.** gVisor is not installed |
+| Claude Code itself inside the container | `claude --version` and `claude doctor` work. **No logged-in session has been run yet** |
 | Managed settings blocking hooks and MCP servers | Follows Anthropic's docs. **Not exercised.** Stage 3 says how to check it |
-| Podman-specific behaviour: internal-network DNS, two networks on the proxy, `keep-id` ownership, secrets as environment variables, the perf seccomp profile | From Podman's docs. **Not exercised** |
+| `02-github-single-repo.sh` | **Not run against GitHub.** URL parameters, permission names and ruleset fields checked against GitHub's docs. Option handling tested |
+| `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |
+| `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
 
 ## Sources
 

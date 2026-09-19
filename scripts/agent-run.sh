@@ -62,13 +62,23 @@ if ! podman container exists "$PROXY" || [ "$(podman inspect -f '{{.State.Runnin
     -v "$CFG_DIR/squid-dns.conf":/etc/squid/dns.conf:ro \
     localhost/agent-proxy >/dev/null
 fi
-PROXY_URL="http://$PROXY:3128"
+# The agent reaches the proxy by IP address. DNS is switched off on the internal network so
+# that the agent cannot resolve outside names at all (no DNS tunnelling).
+PROXY_IP="$(podman inspect "$PROXY" --format "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}")"
+[ -n "$PROXY_IP" ] || { echo "could not find the proxy's address on $NET; see: podman logs $PROXY" >&2; exit 1; }
+# Wait (up to ~10 s) until squid accepts connections.
+for _ in $(seq 1 20); do
+  podman exec "$PROXY" bash -c 'exec 3<>/dev/tcp/127.0.0.1/3128' 2>/dev/null && break
+  sleep 0.5
+done
+PROXY_URL="http://$PROXY_IP:3128"
 
 # ---- assemble the agent container ------------------------------------------------------
 ARGS=(
   --rm -it
   --name "agent-$(printf '%s' "$(basename "$PWD")" | tr -c 'a-zA-Z0-9_.-' '-')-$$"
   --network "$NET"                       # internal network: no route out except the proxy
+  --dns none                             # no resolver at all: lookups fail at once, the proxy resolves
   --userns=keep-id:uid=1000,gid=1000     # you on the host == 'agent' in the container
   --cap-drop=ALL                         # no Linux capabilities at all
   --security-opt=no-new-privileges       # setuid binaries cannot raise privileges

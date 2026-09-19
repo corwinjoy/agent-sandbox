@@ -11,19 +11,18 @@ and hardware perf counters.
 
 ## Status
 
-Early and only partly tested. Read this before relying on it.
+Early and partly tested. Read this before relying on it.
 
 | Piece | Status |
 | --- | --- |
-| All scripts | Pass `bash -n` |
-| `01-setup-podman.sh`, `agent-run.sh` | **Not yet run under Podman.** `agent-run.sh` was dry-run against a stub `podman` |
+| `01-setup-podman.sh` | Run once on Ubuntu 24.04 with Podman 4.9.3. Three bugs found and fixed; not yet re-run from scratch |
+| `agent-run.sh` | Trusted and untrusted modes confirmed under Podman: file ownership, no capabilities, allowlist, no direct route, no DNS. `--perf` and `--gpu --perf` confirmed |
+| `--gpu` | Confirmed: a CUDA kernel compiled and ran on the GPU inside the container. Needed a compatible CDI spec on Podman 4.9, which the setup script now installs |
+| Claude Code logged in inside the container; managed settings blocking hooks and MCP servers | **Not exercised** |
 | `02-github-single-repo.sh` | **Not yet run against GitHub** |
-| Agent and proxy images | Build and run under Docker. Proxy allowlist verified under Docker |
 | `03-claude-settings.sh`, `inspect-repo.sh` | Tested against sample inputs |
-| Managed settings blocking hooks and MCP servers | Follows Anthropic's docs. Not exercised |
-| Podman-specific behaviour (internal-network DNS, two networks on the proxy, `keep-id`, secrets) | Follows Podman's docs. Not exercised |
 
-Try it on a scratch machine and a scratch repository first. The guide's [Test status](docs/setup-guide.md#test-status) section has the detail. Fixes are welcome.
+Try it on a scratch repository first. The guide's [Test status](docs/setup-guide.md#test-status) section has the detail. Fixes are welcome.
 
 ## Quick start
 
