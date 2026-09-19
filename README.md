@@ -21,12 +21,13 @@ Early and only partly tested. Read this before relying on it.
 | Agent and proxy images | Build and run under Docker. Proxy allowlist verified under Docker |
 | `03-claude-settings.sh`, `inspect-repo.sh` | Tested against sample inputs |
 | Managed settings blocking hooks and MCP servers | Follows Anthropic's docs. Not exercised |
+| Podman-specific behaviour (internal-network DNS, two networks on the proxy, `keep-id`, secrets) | Follows Podman's docs. Not exercised |
 
-Try it on a scratch machine and a scratch repository first. Fixes are welcome.
+Try it on a scratch machine and a scratch repository first. The guide's [Test status](docs/setup-guide.md#test-status) section has the detail. Fixes are welcome.
 
 ## Quick start
 
-Ubuntu 22.04+ or Debian 12+. Check the host prerequisites in the guide's
+Ubuntu 24.04, or another apt-based distribution with Podman 4.3 or later (Ubuntu 22.04 is too old). Check the host prerequisites in the guide's
 [Before you start](docs/setup-guide.md#before-you-start) section first: leaving the `docker`
 group and updating runc and the NVIDIA Container Toolkit matter more than anything below.
 
@@ -40,8 +41,7 @@ export PATH="$PWD/scripts:$PATH"
 03-claude-settings.sh                                # Stage 3: harden Claude Code on the host
 
 cd ~/src/myrepo
-agent-run.sh --shell      # first time: run `claude`, then /login, then exit
-agent-run.sh              # normal session; add --gpu and --perf as needed
+agent-run.sh              # the first run asks you to log in to Claude; add --gpu and --perf as needed
 ```
 
 For a repository you have not reviewed:
@@ -59,7 +59,7 @@ cd untrusted/project && agent-run.sh --untrusted           # no token, no GPU, m
 | [`scripts/01-setup-podman.sh`](scripts/01-setup-podman.sh) | Host checks, Podman install, NVIDIA CDI spec, perf seccomp profile, images, internal networks |
 | [`scripts/02-github-single-repo.sh`](scripts/02-github-single-repo.sh) | Fine-grained token for one repo (read, commit, push, comment), verified and stored as a Podman secret |
 | [`scripts/03-claude-settings.sh`](scripts/03-claude-settings.sh) | Merges sandbox and credential hardening into `~/.claude/settings.json` |
-| [`scripts/agent-run.sh`](scripts/agent-run.sh) | Launcher: `--gpu`, `--perf`, `--gvisor`, `--untrusted`, `--shell` |
+| [`scripts/agent-run.sh`](scripts/agent-run.sh) | Launcher: `--gpu`, `--perf`, `--untrusted`, `--shell`, and an experimental CPU-only `--gvisor` |
 | [`scripts/inspect-repo.sh`](scripts/inspect-repo.sh) | Reviews a repository's agent config, editor tasks and install scripts before anything opens it |
 | [`scripts/container/`](scripts/container/) | Containerfiles, Squid config, domain allowlists, git config, Claude Code managed settings |
 

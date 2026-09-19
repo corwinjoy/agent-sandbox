@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Stage 1: rootless Podman sandbox for a coding agent (Ubuntu 22.04+/Debian 12+).
+# Stage 1: rootless Podman sandbox for a coding agent.
+# Written for Ubuntu 24.04. Needs Podman 4.3+ with the netavark network backend, so
+# Ubuntu 22.04 (Podman 3.4) is too old. Other apt-based distros with Podman 4.3+ should work.
 #
 # What it does, in order:
 #   1. Checks the host for known-bad states (docker group, old NVIDIA toolkit, old runc).
@@ -35,7 +37,7 @@ fi
 if command -v runc >/dev/null; then
   RUNC_V="$(runc --version | awk 'NR==1{print $3}')"
   ver_ge "$RUNC_V" 1.2.8 && ok "runc $RUNC_V" \
-    || warn "runc $RUNC_V predates the Nov 2025 escape fixes (need 1.2.8 / 1.3.3+). Update Docker/containerd."
+    || warn "runc $RUNC_V predates the Nov 2025 escape fixes (need 1.2.8 / 1.3.3+). Matters if you keep using Docker: update Docker/containerd."
 fi
 if command -v nvidia-ctk >/dev/null; then
   CTK_V="$(nvidia-ctk --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
@@ -47,9 +49,15 @@ fi
 say "Installing Podman and rootless helpers"
 sudo apt-get update -qq
 # uidmap: newuidmap/newgidmap for user namespaces. passt/slirp4netns: rootless networking.
-# crun: low-level runtime (not affected by the runc bugs above). jq: used by these scripts.
+# crun: Podman's low-level runtime. Keep it updated through apt like any other package: the
+# runc maintainers said crun "may have similar security issues" to the Nov 2025 runc bugs.
+# jq: used by these scripts.
 sudo apt-get install -y podman uidmap slirp4netns passt fuse-overlayfs crun jq curl
-ok "$(podman --version)"
+PODMAN_V="$(podman --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+ver_ge "$PODMAN_V" 4.3.0 || { warn "Podman $PODMAN_V is too old: agent-run.sh needs 4.3+ (--userns=keep-id:uid=...)."; exit 1; }
+ok "podman $PODMAN_V"
+[ "$(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null)" = netavark ] \
+  || warn "Network backend is not netavark. Internal networks with name resolution need it."
 
 # ---------------------------------------------------------------- 3. subuid / subgid
 say "Checking subordinate id ranges"

@@ -2,17 +2,11 @@
 
 Last updated 2026-09-18
 
+> **Status: partly tested.** The Podman setup script, the launcher and the GitHub script have not yet been run end to end. [Test status](#test-status) lists exactly what was and was not checked. Try this on a scratch machine and a scratch repository first.
+
 ## Overview
 
-This guide sets up Claude Code so that the agent, its hooks and its MCP servers all run inside a rootless Podman container that can see one project directory, reach an allowlist of domains, and hold one GitHub token that works on one repository. It takes about 30 minutes on Ubuntu 24.04.
-
-| Stage | You run | You get |
-| --- | --- | --- |
-| 1. Podman | `01-setup-podman.sh` | Rootless Podman, GPU access through CDI, the agent image, the egress proxy, two no-route-out networks |
-| 2. GitHub | `02-github-single-repo.sh OWNER/REPO` | A fine-grained token for that repo only: read, commit, push, comment. Stored as a Podman secret |
-| 3. Claude Code settings | Baked into the image, plus `03-claude-settings.sh` for the host | Project hooks and MCP servers blocked, merge and force-push gated, host secrets unreadable |
-| Daily use | `agent-run.sh [--gpu] [--perf]` | Claude Code on the current directory, inside the sandbox |
-| New untrusted repo | `inspect-repo.sh URL`, then `agent-run.sh --untrusted` | A review of everything the repo would auto-run, then a session with no token, no GPU and model-API-only network |
+This guide puts Claude Code, together with its hooks and MCP servers, inside a rootless Podman container. The container can see one project directory, can reach a short list of domains, and holds one GitHub token that works on one repository.
 
 ```mermaid
 flowchart LR
@@ -30,68 +24,107 @@ flowchart LR
   X --> I[api.anthropic.com<br/>github.com<br/>registries]
 ```
 
-The agent container has no route to the internet. Its only way out is the proxy, which allows HTTPS to listed domains and refuses everything else.
+How to read the diagram:
+
+- **The agent container has no route to the internet.** Its network is created with `--internal`. DNS on that network answers only container names, so the agent cannot even look up an outside host.
+- **The proxy container is the only way out.** It allows HTTPS to the domains in an allowlist file and refuses everything else. The agent cannot change it, because it runs in a different container.
+- **The project directory is the only host path mounted.** Your home directory, SSH keys and cloud credentials are not in the container.
+- **The GitHub token is attached only when you start the agent inside a checkout of the repository the token was made for.**
+
+### The five scripts
+
+| Step | You run | You get |
+| --- | --- | --- |
+| Stage 1. Podman | `01-setup-podman.sh` | Rootless Podman, GPU access through CDI, the agent image, the proxy image, two internal networks |
+| Stage 2. GitHub | `02-github-single-repo.sh OWNER/REPO` | A token for that repository only: read, commit, push, comment. Stored as a Podman secret |
+| Stage 3. Claude Code settings | Nothing for the container. `03-claude-settings.sh` for the host | In the container: repo hooks and MCP servers blocked, merge denied, force-push gated. On the host: secrets unreadable to the agent |
+| Daily use | `agent-run.sh [--gpu] [--perf]` | Claude Code on the current directory, inside the sandbox |
+| New untrusted repo | `inspect-repo.sh URL`, then `agent-run.sh --untrusted` | A review of what the repo would auto-run, then a session with no token, no GPU and model-API-only network |
+
+### Quick path
+
+```bash
+git clone https://github.com/corwinjoy/agent-sandbox.git && cd agent-sandbox
+export PATH="$PWD/scripts:$PATH"          # add this line to ~/.bashrc to keep it
+
+01-setup-podman.sh                                             # Stage 1, asks for sudo
+02-github-single-repo.sh OWNER/REPO --protect-default-branch   # Stage 2, opens a GitHub page
+03-claude-settings.sh                                          # Stage 3, host side
+
+cd ~/src/myrepo && agent-run.sh                                # first run asks you to log in to Claude
+```
 
 ### What this does not give you
 
-- It is a shared-kernel sandbox. A Linux kernel or NVIDIA driver bug can still reach the host. Appendix A covers when to use a VM instead.
-- The project directory is writable, so the agent can change any file in it, including build scripts you later run on the host.
-- `github.com` is on the allowlist, so data can be sent there. The single-repo token limits where.
+- **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) says when to use a VM instead.
+- **The project directory is writable.** The agent can change any file in it, including build scripts you might later run on the host.
+- **`github.com` is on the allowlist,** so data can be sent there. The single-repo token limits where it can be written.
 
-### What was tested
+### Terms used in this guide
 
-The scripts live in [`scripts/`](../scripts/). On the authoring machine (Ubuntu 24.04, Docker 27.2, no Podman installed):
-
-| Piece | Status |
+| Term | Meaning |
 | --- | --- |
-| All scripts | Pass `bash -n`. Not run end to end |
-| Agent image | Builds and runs under Docker. Claude Code 2.1.277 installs, `claude doctor` reports no settings problems, the git credential helper returns the token |
-| Proxy allowlist | Tested under Docker: allowed domains connect, `example.com` gets 403, plain HTTP gets 403, direct egress has no route |
-| `03-claude-settings.sh` | Merge tested against a sample settings file |
-| `inspect-repo.sh` | Tested against a fabricated hostile repo (flagged all 8 planted items) and a clean repo (0 flags, exits cleanly) |
-| `01-setup-podman.sh`, `agent-run.sh`, `02-github-single-repo.sh` | **Not run.** Podman was not available, and the GitHub script needs a real token. The launcher was dry-run against a stub podman to check the commands it builds for trusted, GPU, perf and untrusted modes. Expect to fix small things on first use |
+| Rootless Podman | Podman run by your normal user, with no root daemon. Root inside the container maps to an unprivileged id on the host |
+| CDI | Container Device Interface. A file, `/etc/cdi/nvidia.yaml`, that tells Podman which device nodes and driver libraries make up "the GPU" |
+| Internal network | A Podman network created with `--internal`. Containers on it can talk to each other and to nothing else |
+| Fine-grained token | A GitHub personal access token (`github_pat_...`) limited to chosen repositories and chosen permissions. Classic tokens (`ghp_...`) cannot be limited to one repository |
+| Podman secret | A value Podman stores outside any container and injects at start. Here it becomes the `GH_TOKEN` environment variable |
+| Managed settings | `/etc/claude-code/managed-settings.json`. The one Claude Code settings level that a repository's own settings cannot override |
+| Hook | A command Claude Code runs automatically at a lifecycle event. A repository can define hooks in `.claude/settings.json` |
+| MCP server | A helper process that gives Claude extra tools. A repository can ask for one to be started in `.mcp.json` |
 
 ## Before you start
 
-Fix these host problems first, because each one lets code running as you skip the sandbox entirely. `01-setup-podman.sh` checks for all of them and prints a warning.
+### Requirements
+
+- Ubuntu 24.04, or another apt-based distribution with **Podman 4.3 or later** and the netavark network backend. Ubuntu 22.04 ships Podman 3.4, which is too old. `01-setup-podman.sh` checks the version and stops if it is too old.
+- `git`, `curl`, `jq`. Optionally the `gh` CLI, logged in as yourself, for the branch-protection step in Stage 2.
+- For GPU work: an NVIDIA GPU with the driver and the NVIDIA Container Toolkit installed on the host.
+
+### Fix these host problems first
+
+Each one lets code running as you skip the sandbox entirely. `01-setup-podman.sh` checks for them and prints a warning.
 
 | Check | Command | Needs to be | Fix |
 | --- | --- | --- | --- |
 | Not in the `docker` group | `id -nG` | `docker` absent | `sudo gpasswd -d $USER docker`, then log out and in |
 | Not in the `lxd` group | `id -nG` | `lxd` absent | `sudo gpasswd -d $USER lxd` |
-| runc | `runc --version` | 1.2.8, 1.3.3 or later | Update Docker Engine and containerd |
+| runc, only if you keep Docker installed | `runc --version` | 1.2.8, 1.3.3 or later | Update Docker Engine and containerd |
 | NVIDIA Container Toolkit (GPU users) | `nvidia-ctk --version` | 1.17.8 or later | Update from NVIDIA's apt repository |
-| NVIDIA driver (GPU users) | `nvidia-smi` | 580.95.05 or later | Update the driver |
-| Claude Code | `claude --version` | Current release | Leave auto-update on |
+| NVIDIA driver (GPU users) | `nvidia-smi` | A release from October 2025 or later. On the 580 branch that is 580.95.05 | Update the driver |
+| Claude Code on the host | `claude --version` | Current release | Leave auto-update on |
 
-**Why.** Membership of the `docker` or `lxd` group is root on the host: `docker run -v /:/host` needs no password. Older runc and NVIDIA toolkit versions have published container escapes to host root. Appendix A has the CVE details.
-
-You also need `git`, `curl`, `jq`, and optionally the `gh` CLI logged in as yourself for the branch-protection step in Stage 2.
+**Why.** Membership of the `docker` or `lxd` group is root on the host: `docker run -v /:/host` needs no password. Older runc and NVIDIA toolkit versions have published container escapes to host root. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) has the CVE details.
 
 ## Stage 1: Podman
 
-**Why.** Claude Code's built-in sandbox covers Bash commands only; hooks and MCP servers run on the host as you, and it cannot expose a GPU. Putting the whole agent in a container covers all three. Rootless Podman has no root daemon and no root-equivalent group, so a container-runtime bug lands an attacker in your unprivileged account, not in root. Details in Appendix A.
+**Why.** Claude Code's built-in sandbox covers Bash commands only. Hooks and MCP servers run on the host as you, and the sandbox cannot expose a GPU. Putting the whole agent in a container covers all three. Rootless Podman has no root daemon and no root-equivalent group, so a container-runtime bug lands an attacker in your unprivileged account, not in root. Details in [Appendix A](#appendix-a-why-rootless-podman-and-its-limits).
 
 **Run it.**
 
 ```bash
-cd scripts
-./01-setup-podman.sh
-# CUDA toolkit inside the image (nvcc, headers): pick a CUDA base instead of plain Ubuntu
-BASE_IMAGE=docker.io/nvidia/cuda:12.6.3-devel-ubuntu24.04 ./01-setup-podman.sh
+01-setup-podman.sh
 ```
+
+If you need the CUDA toolkit (`nvcc`, headers) inside the container, build on a CUDA base image instead of plain Ubuntu. The NVIDIA driver libraries are injected at run time either way.
+
+```bash
+BASE_IMAGE=docker.io/nvidia/cuda:12.6.3-devel-ubuntu24.04 01-setup-podman.sh
+```
+
+The script is safe to re-run. It uses `sudo` only for `apt` and for writing `/etc/cdi`.
 
 **What it sets up.**
 
 | Piece | Purpose |
 | --- | --- |
-| `podman`, `uidmap`, `passt`, `slirp4netns`, `crun` | Rootless containers and their networking. `crun` is the runtime, so the runc bugs do not apply |
+| `podman`, `uidmap`, `passt`, `slirp4netns`, `crun` | Rootless containers and their networking. `crun` is Podman's low-level runtime. Keep it updated through apt like any other package |
 | `/etc/subuid`, `/etc/subgid` entries | The id ranges user namespaces need |
-| `/etc/cdi/nvidia.yaml` | Lets a container request the GPU with `--device nvidia.com/gpu=all`. Regenerate after each driver update |
-| `~/.config/agent-sandbox/seccomp-perf.json` | Podman's default seccomp profile plus `perf_event_open`, used only with `--perf` |
-| `~/.config/agent-sandbox/allowed-domains*.txt` | The egress allowlists. Edit these, then restart the proxy container |
-| `localhost/agent-claude` image | Ubuntu, Claude Code, git, gh, Python, build tools, non-root user `agent`, managed settings, git config |
-| `localhost/agent-proxy` image | Squid, HTTPS CONNECT to allowlisted domains only |
+| `/etc/cdi/nvidia.yaml` | Lets a container request the GPU with `--device nvidia.com/gpu=all`. Regenerate it after each driver update by re-running the script |
+| `~/.config/agent-sandbox/seccomp-perf.json` | Podman's default seccomp profile plus `perf_event_open`. Used only with `--perf` |
+| `~/.config/agent-sandbox/allowed-domains*.txt` | The egress allowlists. Your copies; the script never overwrites them |
+| `localhost/agent-claude` image | Ubuntu, Claude Code, git, gh, Python, build tools, perf, the non-root user `agent`, managed settings, git config |
+| `localhost/agent-proxy` image | Squid. Allows HTTPS CONNECT to allowlisted domains only |
 | `agent-internal`, `agent-untrusted` networks | Created with `--internal`: no route to the outside |
 
 **The script:** [`scripts/01-setup-podman.sh`](../scripts/01-setup-podman.sh), commented step by step. The container build files it uses are in [`scripts/container/`](../scripts/container/).
@@ -99,14 +132,14 @@ BASE_IMAGE=docker.io/nvidia/cuda:12.6.3-devel-ubuntu24.04 ./01-setup-podman.sh
 **Check it worked.**
 
 ```bash
-podman run --rm --device nvidia.com/gpu=all docker.io/library/ubuntu:24.04 nvidia-smi -L   # GPU users
-podman images | grep agent-          # two images
-podman network ls | grep agent-      # two networks
+podman images | grep agent-          # two images: agent-claude and agent-proxy
+podman network ls | grep agent-      # two networks: agent-internal and agent-untrusted
+podman run --rm --device nvidia.com/gpu=all docker.io/library/ubuntu:24.04 nvidia-smi -L   # GPU users: lists your GPU
 ```
 
 ## Stage 2: GitHub for a single repository
 
-**Why.** A prompt-injected agent uses whatever credential it holds. In the 2025 GitHub MCP exploit, a malicious issue in a public repo made an agent copy private-repo data into a public pull request, and the only precondition was one token that covered both. A token that works on one repository has nothing else to leak. Details in Appendix B.
+**Why.** A prompt-injected agent uses whatever credential it holds. In the 2025 GitHub MCP exploit, a malicious issue in a public repository made an agent copy private-repository data into a public pull request. The only precondition was one token that covered both. A token that works on one repository has nothing else to leak. Details in [Appendix B](#appendix-b-github-permissions-in-detail).
 
 **Permissions the token gets.**
 
@@ -122,14 +155,21 @@ Left off on purpose: Workflows (so it cannot edit `.github/workflows`), Administ
 **Run it.**
 
 ```bash
-./02-github-single-repo.sh myorg/myrepo --protect-default-branch
-# optional: prove another private repo of yours is invisible to the token
-./02-github-single-repo.sh myorg/myrepo --canary myorg/some-other-private-repo
+02-github-single-repo.sh myorg/myrepo --protect-default-branch
 ```
 
-GitHub has no API for creating fine-grained tokens. The script opens the creation page with the name, owner, expiry and permissions [pre-filled from URL parameters](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). You pick the repository by hand, generate, and paste the token back. The script then checks the token and stores it as a Podman secret named `gh-OWNER-REPO`, which `agent-run.sh` attaches only when you start it inside a checkout of that repo.
+What happens, step by step:
 
-**The script:** [`scripts/02-github-single-repo.sh`](../scripts/02-github-single-repo.sh), commented step by step. The part that fixes the permissions is the pre-filled URL:
+1. The script opens GitHub's token page with the name, owner, 30-day expiry and the three permissions [pre-filled from URL parameters](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). GitHub has no API for creating fine-grained tokens, so this part is by hand.
+2. Under "Repository access" you choose "Only select repositories" and pick the one repository. The link cannot pre-fill this field, and it is the one that matters most.
+3. You generate the token and paste it into the script. The input is hidden.
+4. The script refuses classic (`ghp_`) tokens, confirms the repository is readable, prints the expiry, and fails if the token can see any other private repository.
+5. It stores the token as a Podman secret named `gh-OWNER-REPO`.
+6. With `--protect-default-branch` it uses your own `gh` login, not the agent's token, to add a ruleset: no force-push to, no deletion of, and no direct push to the default branch. The agent's work then arrives as pull requests. Rulesets on private repositories need a paid GitHub plan.
+
+Options: `--expires-days N` changes the expiry. `--canary OWNER/OTHER` names another private repository of yours and fails unless the token gets a 404 for it.
+
+**The script:** [`scripts/02-github-single-repo.sh`](../scripts/02-github-single-repo.sh), commented step by step. The permissions are fixed by this part:
 
 ```bash
 URL="https://github.com/settings/personal-access-tokens/new"
@@ -142,21 +182,39 @@ URL+="&issues=write"                  # comment on issues
 URL+="&pull_requests=write"           # open PRs, comment on PRs
 ```
 
-After you paste the token back, the script refuses classic (`ghp_`) tokens, confirms the target repo is readable, prints the expiry, fails if any other private repository is visible to the token, stores it with `podman secret create`, and with `--protect-default-branch` adds a ruleset using your own `gh` login.
+**Where the token lives.** Podman's default secret store is a file under `~/.local/share/containers/storage/secrets`. It is base64-encoded, not encrypted, and readable only by your user. It is never in the project directory, on a command line or in `podman inspect` output. Stage 3 stops host-side agent sessions from reading that path.
 
-**Inside the container** the token arrives as `GH_TOKEN`. The image's `/etc/gitconfig` has a credential helper that hands it to git for `https://github.com` only, and rewrites `git@github.com:` remotes to HTTPS because the container has no SSH keys and no route except the proxy. The `gh` CLI reads `GH_TOKEN` by itself.
+**Inside the container** the token arrives as the `GH_TOKEN` environment variable. The image's `/etc/gitconfig` has a credential helper that hands it to git for `https://github.com` only. It also rewrites `git@github.com:` remotes to HTTPS, because the container has no SSH keys and no route except the proxy. The `gh` CLI reads `GH_TOKEN` by itself.
 
-**Not yet run against GitHub.** The URL parameters and permission names come from GitHub's docs; the ruleset payload and the private-repo listing check are untested. Try the script on a scratch repository first.
+**Check it worked.**
+
+```bash
+podman secret ls                          # shows gh-myorg-myrepo
+cd ~/src/myrepo && agent-run.sh --shell   # prints "GitHub token attached for myorg/myrepo"
+# then, inside the container:
+gh api repos/myorg/myrepo --jq .full_name        # prints myorg/myrepo
+gh api repos/myorg/another-private-repo          # must fail with 404 Not Found
+git push --dry-run                               # no authentication error
+```
+
+**Rotate or revoke.** Re-run the script to rotate; it replaces the secret. To revoke, delete the token at <https://github.com/settings/personal-access-tokens> and run `podman secret rm gh-myorg-myrepo`.
+
+**Not yet run against GitHub.** The URL parameters, permission names and ruleset fields come from GitHub's docs. The check that lists private repositories is a heuristic. Try the script on a scratch repository first.
 
 ## Stage 3: Claude Code settings
 
-**Why.** A repository can ship its own `.claude/settings.json`, and project settings outrank your user settings. A user-level `disableAllHooks: true` can be switched back off by the repo. Managed settings are the one level a repository cannot override, so the rules that matter go there. Details in Appendix C.
+**Why.** A repository can ship its own `.claude/settings.json`, and project settings outrank your user settings. A user-level `disableAllHooks: true` can be switched back off by the repository. Managed settings are the one level a repository cannot override, so the rules that matter go there. Details in [Appendix C](#appendix-c-claude-code-settings-in-detail).
 
 There are two places to configure, and they do different jobs.
 
-### Inside the container: managed settings (already done by Stage 1)
+| Where | File | How it gets there | Job |
+| --- | --- | --- | --- |
+| Inside the container | `/etc/claude-code/managed-settings.json` | Built into the image by Stage 1. Nothing to run | Stop a repository's hooks and MCP servers from running. Keep merge and force-push in your hands |
+| On the host | `~/.claude/settings.json` | `03-claude-settings.sh` | Protect your secrets for the times you run `claude` outside the container |
 
-The image carries `/etc/claude-code/managed-settings.json`. Nothing to run; edit [`scripts/container/managed-settings.json`](../scripts/container/managed-settings.json) and rebuild to change it.
+### Inside the container: managed settings
+
+To change them, edit [`scripts/container/managed-settings.json`](../scripts/container/managed-settings.json) and re-run `01-setup-podman.sh` to rebuild the image.
 
 ```json
 {
@@ -182,119 +240,163 @@ The image carries `/etc/claude-code/managed-settings.json`. Nothing to run; edit
 
 | Key | Effect |
 | --- | --- |
-| `allowManagedHooksOnly` | Blocks hooks from user, project, local and plugin settings. A cloned repo's hooks never run |
-| `allowManagedMcpServersOnly` with an empty `allowedMcpServers` | Only MCP servers named in this file may load. The list is empty, so a repo's `.mcp.json` is ignored. Add servers you vet by name |
+| `allowManagedHooksOnly` | Blocks hooks from user, project, local and plugin settings. A cloned repository's hooks never run |
+| `allowManagedMcpServersOnly` with `allowedMcpServers: []` | Only servers on the managed allowlist may load, and [an empty list means none](https://code.claude.com/docs/en/managed-mcp). A repository's `.mcp.json` is ignored |
 | `enableAllProjectMcpServers: false` | No blanket approval of project MCP servers |
 | `permissions.deny` | The agent opens pull requests and you merge them. Deny rules win over any allow rule from any scope |
 | `permissions.ask` | Force-pushes always prompt |
 
-Bash rules match the command text, so they are a guard rail, not a boundary. The boundary is the token's permissions and the branch ruleset from Stage 2.
+To allow an MCP server you have vetted, add an entry to `allowedMcpServers` that pins what actually runs: `{ "serverCommand": ["npx", "-y", "some-server@1.2.3"] }` for a local server, which must match the command and arguments exactly, or `{ "serverUrl": "https://mcp.example.com/*" }` for a remote one. A remote server's domain also has to be on the proxy allowlist. Anthropic's docs say a `serverName` entry "is not a security control", because anyone can give any server that name.
 
-The Claude Code Bash sandbox is left off inside the container. It needs a weaker nested mode there, and the container plus proxy already do its job.
+Bash permission rules match the command text, so they are a guard rail, not a boundary. The boundary is the token's permissions and the branch ruleset from Stage 2.
+
+Claude Code's own Bash sandbox is left off inside the container. It needs a weaker nested mode there, and the container plus the proxy already do its job.
 
 ### On the host: for the times you run `claude` outside the container
 
 ```bash
-./03-claude-settings.sh            # merge hardening into ~/.claude/settings.json, backup kept
-./03-claude-settings.sh --managed  # also install /etc/claude-code/managed-settings.json (sudo)
+03-claude-settings.sh            # merge hardening into ~/.claude/settings.json; a dated backup is kept
+03-claude-settings.sh --managed  # also install /etc/claude-code/managed-settings.json on the host (sudo)
 ```
 
-The merge keeps your existing settings, unions lists, and sets:
+The merge keeps your existing settings and unions lists. It sets:
 
 | Setting | Effect |
 | --- | --- |
-| `sandbox.enabled`, `failIfUnavailable: true` | Bash sandbox on, and a hard failure instead of silently running unsandboxed when bubblewrap is missing |
+| `sandbox.enabled`, `sandbox.failIfUnavailable: true` | Bash sandbox on. A hard failure, instead of silently running unsandboxed, when bubblewrap is missing |
 | `sandbox.allowUnsandboxedCommands: false` | Removes the retry-outside-the-sandbox escape hatch |
 | `sandbox.network.strictAllowlist: true` | Unlisted domains are denied, not prompted |
-| `sandbox.credentials` | `~/.ssh`, `~/.aws/credentials`, `~/.config/gh`, `~/.docker/config.json` and Podman's secret store are unreadable to sandboxed commands; `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN` are removed from their environment |
+| `sandbox.credentials` | `~/.ssh`, `~/.aws/credentials`, `~/.config/gh`, `~/.docker/config.json` and Podman's secret store are unreadable to sandboxed commands. `GITHUB_TOKEN`, `GH_TOKEN` and `NPM_TOKEN` are removed from their environment |
 | `permissions.deny` Read rules | The same paths, for Claude's Read tool, which the sandbox does not cover |
 | `permissions.disableBypassPermissionsMode` | No bypass mode on the host. Use the container for that |
 
-`--managed` installs a host managed-settings file with `allowManagedHooksOnly`. It also blocks your own user-level hooks, so move any you rely on into that file.
+`--managed` installs a host managed-settings file with `allowManagedHooksOnly`. That also blocks your own user-level hooks, so move any you rely on into that file.
 
-**Check it worked.** In a session run `/status` and look for `Enterprise managed settings (file)` on the `Setting sources` line. Run `claude doctor` to see any setting it rejected. Run `/sandbox` on the host to confirm the mode.
+**Check it worked.** In a session, run `/status` and look for `Enterprise managed settings (file)` on the `Setting sources` line. Run `claude doctor` to see any setting it rejected. On the host, run `/sandbox` to confirm the mode.
+
+To confirm the container blocks repository hooks, put a harmless `SessionStart` hook (for example `touch /tmp/hook-ran`) and a `.mcp.json` in a scratch repository, start `agent-run.sh` there, and check that the file is not created and `/mcp` lists no servers. This has not been exercised yet.
 
 ## Daily use
 
-Start the agent from the project directory with `agent-run.sh`; that directory is the only host path the container can see. Put the scripts directory on your `PATH` first.
+Start the agent from the project directory. That directory is the only host path the container can see.
 
 ```bash
 cd ~/src/myrepo
-agent-run.sh --shell            # first time only: run `claude`, then /login, then exit
-agent-run.sh                    # normal session
+agent-run.sh                    # normal session. The first run asks you to log in; the login is kept
 agent-run.sh --gpu              # CUDA work
 agent-run.sh --gpu --perf       # CUDA plus hardware perf counters
-agent-run.sh --gvisor --gpu     # less-trusted repo, if gVisor is installed (no perf counters)
-agent-run.sh -- --resume        # everything after -- goes to claude
+agent-run.sh --shell            # bash in the container instead of claude, to look around
+agent-run.sh -- --resume        # everything after -- is passed to claude
 ```
 
 | Flag | Adds | Cost |
 | --- | --- | --- |
-| none | Project mounted read-write, proxy-only network, GitHub token if one exists for this repo's origin |  |
-| `--gpu` | `--device nvidia.com/gpu=all` | Code in the container can send raw ioctls to the host NVIDIA driver. Use only when the task needs CUDA |
-| `--perf` | The seccomp profile that allows `perf_event_open` | That syscall can leak some host information, which is why it is blocked by default |
-| `--gvisor` | `--runtime=runsc` | No perf counters. GeForce cards are unofficial. Needs gVisor installed and registered with Podman |
-| `--untrusted` | See the next section | No push, no GPU, no registries |
-| `--shell` | bash instead of claude |  |
+| none | Project mounted read-write, proxy-only network, the GitHub token if one exists for this checkout's `origin` | |
+| `--gpu` | `--device nvidia.com/gpu=all` | Code in the container can send raw ioctls to the host NVIDIA driver. Use it only when the task needs CUDA |
+| `--perf` | The seccomp profile that allows `perf_event_open` | That syscall can leak some host information, which is why it is blocked by default. The host also needs `kernel.perf_event_paranoid` at 2 or lower |
+| `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries |
+| `--shell` | bash instead of claude | |
+| `--gvisor` | `--runtime=runsc`. Experimental | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Appendix A](#the-gpu-trade-off) |
 
-**Every run gets:** no Linux capabilities, `no-new-privileges`, a pids limit of 2048, 16 GB memory limit, a tmpfs `/tmp`, your host user mapped to the container's `agent` user so file ownership in the project stays yours, and Claude's login kept in the `agent-claude-home` volume.
+**Every run gets:** no Linux capabilities, `no-new-privileges`, a limit of 2048 processes and 16 GB of memory, a tmpfs `/tmp`, and your host user mapped to the container's `agent` user so files in the project keep your ownership. Claude's login and history live in the `agent-claude-home` volume, not in the project.
+
+**What feels different from running `claude` on the host.**
+
+- Claude's WebFetch tool runs inside the container, so it only reaches allowlisted domains. Web search runs on Anthropic's side and is not affected.
+- Tools that ignore `HTTPS_PROXY` cannot reach the network at all.
+- The agent has no `sudo` and cannot `apt install`. Add packages to [`Containerfile.agent`](../scripts/container/Containerfile.agent) and rebuild.
+- Your host `~/.claude` settings, memory and MCP servers are not used. The container has its own state.
 
 **Housekeeping.**
 
-```bash
-$EDITOR ~/.config/agent-sandbox/allowed-domains.txt && podman rm -f agent-proxy   # change the allowlist
-podman exec agent-proxy tail -f /var/log/squid/access.log                         # see what was allowed or denied
-./01-setup-podman.sh                                                             # rebuild to update Claude Code
-podman volume rm agent-claude-home                                               # reset Claude state and login
-```
+| Task | Command |
+| --- | --- |
+| Change the allowlist | Edit `~/.config/agent-sandbox/allowed-domains.txt`, then `podman rm -f agent-proxy`. The next `agent-run.sh` starts a fresh proxy |
+| See what was allowed or denied | `podman exec agent-proxy tail -f /var/log/squid/access.log` |
+| Update Claude Code or the image | Re-run `01-setup-podman.sh` |
+| Reset Claude's state and login | `podman volume rm agent-claude-home` |
 
 A `TCP_DENIED/403` line in the proxy log is the quickest way to find the domain a tool needs. Add the narrowest name that works.
 
 ## Opening a new untrusted repository
 
-Never open an unreviewed repo with an agent or an editor on the host. Clone it without running anything, read what it would auto-run, then work on it only in `--untrusted` mode until you have reviewed it.
+Never open an unreviewed repository with an agent or an editor on the host. Clone it without running anything, read what it would auto-run, then work on it only in `--untrusted` mode until you have reviewed it.
 
-**Why.** A cloned repo can carry hooks, MCP server commands, environment overrides, editor tasks that run on folder open, and package install scripts. These have caused code execution and API-key theft in Claude Code (CVE-2025-59536, CVE-2026-21852, both fixed) and still run silently in Cursor, which ships with Workspace Trust off. Details in Appendix C.
+**Why.** A cloned repository can carry hooks, MCP server commands, environment overrides, editor tasks that run on folder open, and package install scripts. These have caused code execution and API-key theft in Claude Code (CVE-2025-59536 and CVE-2026-21852, both fixed). They still run silently in Cursor, which ships with Workspace Trust off. Details in [Appendix C](#appendix-c-claude-code-settings-in-detail).
 
 ### Procedure
 
-1. **Clone and inspect, from the host, with nothing executed.**
+1. **Clone and inspect from the host, with nothing executed.**
+
+   ```bash
+   cd ~/src
+   inspect-repo.sh https://github.com/someone/project.git    # clones into ./untrusted/project
+   ```
+
+   The clone runs with git hooks disabled, no submodules and no LFS smudge. The script then prints and flags:
+
+   - `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`: hooks, `env` overrides such as `ANTHROPIC_BASE_URL`, pre-approved MCP servers, helper commands, shipped allow rules. A committed `settings.local.json` is suspicious in itself, because that file is normally gitignored.
+   - `.vscode/tasks.json` tasks with `runOn: folderOpen`, and any `.devcontainer`.
+   - `package.json` install-time scripts, `setup.py`, `.npmrc`, submodules.
+   - `curl`, `wget`, `nc`, `base64 -d`, `eval` and key paths in agent and editor config.
+   - Invisible Unicode in `CLAUDE.md`, `AGENTS.md`, rules files and READMEs.
+
+2. **Read everything it flagged.** A flag is a prompt to read, not a verdict, and no flags is not a clean bill of health. Read `CLAUDE.md` and `AGENTS.md` in full: they are loaded into the agent's context as if you wrote them.
+
+3. **Start the agent in untrusted mode.** The first run asks for a separate Claude login, because untrusted sessions keep their own state.
+
+   ```bash
+   cd ~/src/untrusted/project
+   agent-run.sh --untrusted
+   ```
+
+   | Untrusted mode changes | Reason |
+   | --- | --- |
+   | No GitHub token attached | Nothing to push with, nothing to steal |
+   | `--gpu` refused | Keeps the NVIDIA driver out of reach of unknown code |
+   | Separate network and proxy, using `allowed-domains-untrusted.txt`: Anthropic endpoints only | No GitHub, no registries, so nowhere to send data |
+   | Separate `agent-claude-home-untrusted` volume | Nothing the repository writes into Claude's state can affect later trusted sessions |
+   | `claude --setting-sources user` | The repository's `.claude/settings*.json` and `.mcp.json` are not read at all |
+   | Managed settings, as always | Hooks and MCP servers from any source stay blocked |
+
+4. **Install dependencies with scripts off.** Add the one registry you need to `~/.config/agent-sandbox/allowed-domains-untrusted.txt` and restart the proxy with `podman rm -f agent-proxy-untrusted`. Install with `npm ci --ignore-scripts`, or `pip install --only-binary=:all:` so that no `setup.py` runs. Then remove the registry again.
+
+5. **Do not run the repository's code on the host.** Tests, builds and `make` targets run inside the container. Anything in the project directory, including Makefiles and `package.json` scripts the agent may have changed, runs with your full privileges if you run it outside.
+
+6. **Promote it once you have reviewed it.** Move the checkout out of `untrusted/`, create a token with Stage 2 if you need to push, and use plain `agent-run.sh`. If you open it in an editor, turn Workspace Trust on first. In Cursor, set `security.workspace.trust.enabled: true` and `task.allowAutomaticTasks: off`.
+
+7. **For code you consider hostile, use a VM or a throwaway cloud machine instead.** This container shares your kernel.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| A tool cannot reach a site, or `CONNECT tunnel failed, response 403` | The domain is not on the allowlist | Find the `TCP_DENIED` line in the proxy log, add the domain, `podman rm -f agent-proxy` |
+| Every outside domain fails, even allowlisted ones | The proxy cannot resolve names. It uses the DNS servers in `~/.config/agent-sandbox/squid-dns.conf`, which the launcher writes from the host's resolvers | Put resolvers that work from your network on the `dns_nameservers` line, then `podman rm -f agent-proxy` |
+| `Could not resolve proxy: agent-proxy` | The proxy container is not running, or the network backend is not netavark | `podman ps -a`, `podman logs agent-proxy`, and `podman info --format '{{.Host.NetworkBackend}}'` |
+| Containers fail at start with `operation not permitted` | Seen with Docker and `no-new-privileges` on the authoring machine. Not yet seen with Podman | Remove `--security-opt=no-new-privileges` in `agent-run.sh` to confirm, and please report it |
+| `nvidia-smi` fails inside the container | CDI spec missing or stale after a driver update | Re-run `01-setup-podman.sh`, then check `nvidia-ctk cdi list` |
+| `perf stat` shows `<not supported>` or permission denied | `--perf` not passed, or `kernel.perf_event_paranoid` above 2 on the host | Pass `--perf`. On the host: `sudo sysctl kernel.perf_event_paranoid=2` |
+| Files in the project end up owned by a strange uid | Podman older than 4.3, so `--userns=keep-id:uid=...` was not honoured | Upgrade Podman |
+| `git push` asks for a username | No token attached. The launcher prints which repository it looked for | Run Stage 2 for that repository. Check that `git remote get-url origin` points at it |
+| Claude asks you to log in every time | The state volume is missing or was removed | `podman volume ls`. Use the same mode each time: trusted and untrusted modes have separate logins |
+| On SELinux hosts, permission denied on `/workspace` | The mount needs relabelling | Add `,Z` to the project mount in `agent-run.sh`. For `--gpu` also add `--security-opt label=disable`, as in NVIDIA's CDI example |
+
+## Removing everything
 
 ```bash
-cd ~/src
-inspect-repo.sh https://github.com/someone/project.git    # clones into ./untrusted/project
+podman rm -f agent-proxy agent-proxy-untrusted
+podman rmi localhost/agent-claude localhost/agent-proxy
+podman network rm agent-internal agent-untrusted
+podman volume rm agent-claude-home agent-claude-home-untrusted
+podman secret ls                     # then: podman secret rm gh-OWNER-REPO for each
+rm -rf ~/.config/agent-sandbox
+sudo rm -f /etc/claude-code/managed-settings.json   # only if you ran 03-claude-settings.sh --managed
+sudo rm -f /etc/cdi/nvidia.yaml                     # only if nothing else on the machine uses CDI
+ls ~/.claude/settings.json.bak.*     # restore the backup you want over ~/.claude/settings.json
 ```
 
-The clone runs with hooks disabled, no submodules and no LFS smudge. The script prints and flags:
-
-- `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`: hooks, `env` overrides such as `ANTHROPIC_BASE_URL`, pre-approved MCP servers, helper commands, shipped allow rules. A committed `settings.local.json` is suspicious in itself.
-- `.vscode/tasks.json` tasks with `runOn: folderOpen`, and any `.devcontainer`.
-- `package.json` install-time scripts, `setup.py`, `.npmrc`, submodules.
-- `curl`, `wget`, `nc`, `base64 -d`, `eval`, key paths in agent and editor config.
-- Invisible Unicode in `CLAUDE.md`, `AGENTS.md`, rules files and READMEs.
-
-2. **Read everything it flagged.** A flag is a prompt to read, not a verdict. Instruction files (`CLAUDE.md`, `AGENTS.md`) deserve a full read: they are loaded into the agent's context as if you wrote them.
-3. **Start the agent in untrusted mode.**
-
-```bash
-cd ~/src/untrusted/project
-agent-run.sh --shell --untrusted    # first time only: separate login for the untrusted state volume
-agent-run.sh --untrusted
-```
-
-| Untrusted mode changes | Reason |
-| --- | --- |
-| No GitHub token attached | Nothing to push with, nothing to steal |
-| `--gpu` refused | Keeps the NVIDIA driver out of reach of unknown code |
-| Separate network and proxy with `allowed-domains-untrusted.txt`: Anthropic endpoints only | No GitHub, no registries, so nowhere to send data |
-| Separate `agent-claude-home-untrusted` volume | Nothing the repo writes into Claude's state can affect later trusted sessions |
-| `claude --setting-sources user` | The repo's `.claude/settings*.json` and `.mcp.json` are not read at all |
-| Managed settings, as always | Hooks and MCP servers from any source stay blocked |
-
-4. **Installing dependencies.** Add the one registry you need to `allowed-domains-untrusted.txt`, restart the proxy with `podman rm -f agent-proxy-untrusted`, install with scripts off (`npm ci --ignore-scripts`, `pip install --only-binary=:all:` so no setup.py runs), then remove the registry again.
-5. **Do not run the repo's code on the host.** Tests, builds and `make` targets run inside the container. Anything the agent changed in the project directory, including Makefiles and `package.json` scripts, runs with your full privileges if you run it outside.
-6. **Promote it when you have reviewed it.** Move the checkout out of `untrusted/`, create a token with Stage 2 if you need to push, and use plain `agent-run.sh`. If you open it in an editor, turn Workspace Trust on first: in Cursor set `security.workspace.trust.enabled: true` and `task.allowAutomaticTasks: off`.
-7. **For code you consider hostile,** use a VM or a throwaway cloud machine instead. This container shares your kernel.
+Also delete the tokens at <https://github.com/settings/personal-access-tokens> and, if you added one, the `agent-guard-default-branch` ruleset in the repository's settings.
 
 ## Appendix A: why rootless Podman, and its limits
 
@@ -311,6 +413,7 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 - The Docker daemon runs as root and the `docker` group is root-equivalent.
 - Containers share the host kernel and are started by a privileged runtime. In November 2025 runc fixed [CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm) and two related bugs that let a hostile Dockerfile or container gain host root. Fixed in runc 1.2.8 and 1.3.3.
 - The runc maintainers say rootless containers "entirely mitigate" that bug's privilege escalation, because an unprivileged runtime cannot write the procfs files the attack targets. That is the main reason for rootless.
+- Switching runtime is not the fix. Podman here uses crun, and the same advisory says crun and youki "may have similar security issues". Keep crun updated through apt. What protects you is that the runtime runs without privileges.
 - [CVE-2025-23266 "NVIDIAScape"](https://www.wiz.io/blog/nvidia-ai-vulnerability-cve-2025-23266-nvidiascape) (CVSS 9.0): a three-line Dockerfile got host root through the NVIDIA Container Toolkit's hook. Fixed in toolkit 1.17.8. It triggers when a container is created from an attacker's image, so never let the agent build or start containers on the host.
 
 ### What each launcher flag buys
@@ -318,7 +421,7 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 | Flag in `agent-run.sh` | Stops |
 | --- | --- |
 | Rootless, `--userns=keep-id` | Root in the container is not root on the host. Project files keep your ownership |
-| `--network agent-internal` plus the proxy | Exfiltration to arbitrary hosts and reverse shells. The agent cannot remove the rule because it is enforced in another container |
+| `--network agent-internal` plus the proxy | Exfiltration to arbitrary hosts, reverse shells and DNS tunnelling. On an internal network Podman's DNS [answers only container names](https://docs.podman.io/en/latest/markdown/podman-network-create.1.html) and returns NXDOMAIN for the rest. The agent cannot remove the rule, because it is enforced in another container |
 | `--cap-drop=ALL`, `no-new-privileges` | Raw sockets, mounts, ptrace of other users' processes, setuid escalation |
 | Only `$PWD` mounted | Reading `~/.ssh`, cloud credentials, browser profiles, other projects |
 | `--pids-limit`, `--memory` | Fork bombs and memory exhaustion |
@@ -327,15 +430,16 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 
 ### The GPU trade-off
 
-- CUDA talks to the host NVIDIA kernel driver through `/dev/nvidia*`. With `--gpu`, code in the container can send raw ioctls to that driver. [Quarkslab](https://blog.quarkslab.com/nvidia_gpu_kernel_vmalloc_exploit.html) turned two such bugs into a root shell from an unprivileged process; both are fixed in driver 580.95.05. Keep the driver current and pass `--gpu` only when needed.
+- CUDA talks to the host NVIDIA kernel driver through `/dev/nvidia*`. With `--gpu`, code in the container can send raw ioctls to that driver. [Quarkslab](https://blog.quarkslab.com/nvidia_gpu_kernel_vmalloc_exploit.html) turned two such bugs into a root shell from an unprivileged process; both are fixed in driver 580.95.05 and in the matching October 2025 releases of the older branches. Keep the driver current and pass `--gpu` only when needed.
 - The only way to remove the host driver from the attack surface is to hand the whole GPU to a VM over VFIO. Docker Sandboxes, Kata and libvirt all work that way, and all need [a GPU the host is not using](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/). NVIDIA's GPU-sharing modes are licensed datacenter features.
 - [gVisor's nvproxy](https://gvisor.dev/docs/user_guide/gpu/) narrows the driver surface to an allow-list of ioctls and protects against general kernel bugs. It says it is "much less effective" against NVIDIA driver bugs, GeForce cards are unofficial, rootless mode with nvproxy is [broken upstream](https://github.com/google/gvisor/issues/11076), and [`perf_event_open` is unimplemented](https://gvisor.dev/docs/user_guide/compatibility/linux/amd64/).
 
 | Need | Use |
 | --- | --- |
 | CUDA and perf counters, repo you trust | `agent-run.sh --gpu --perf` |
-| CUDA, repo you trust less, no profiling | `agent-run.sh --gvisor --gpu` |
-| Untrusted code, no GPU | `agent-run.sh --untrusted`, or a VM |
+| A repo you trust less, no GPU needed | `agent-run.sh --untrusted`. Optionally add `--gvisor` if you have set gVisor up |
+| CUDA under gVisor | Not available in this rootless setup. It needs a rootful `runsc` with nvproxy, which gives up the rootless protection |
+| Code you consider hostile, no GPU | A VM, a Docker Sandbox in `--clone` mode, or a Claude Code cloud session |
 | Untrusted code that needs a GPU | A separate machine or cloud GPU instance that holds no credentials |
 
 ### Perf counters
@@ -346,11 +450,13 @@ Docker's default seccomp profile [blocks `perf_event_open`](https://docs.docker.
 
 [Their January 2026 guidance](https://developer.nvidia.com/blog/practical-security-guidance-for-sandboxing-agentic-workflows-and-managing-execution-risk/) lists three mandatory controls: an egress allowlist, no writes outside the workspace, and no writes to agent config, hooks or MCP config. This setup meets the first two. For the third, managed settings make repo-written hooks and MCP config inert, but the agent can still edit `CLAUDE.md` in the project. They also recommend VMs over shared-kernel sandboxes, injected short-lived secrets, and recreating sandboxes regularly.
 
+### How the proxy resolves names
+
+The proxy container sits on the internal network too, so the DNS server Podman gives it would refuse outside names. Squid therefore does its own lookups with the servers in `~/.config/agent-sandbox/squid-dns.conf`. `agent-run.sh` writes that file each time it starts the proxy, from the host's upstream resolvers (`/run/systemd/resolve/resolv.conf`, then `/etc/resolv.conf`, skipping loopback addresses), and falls back to `1.1.1.1` and `9.9.9.9`. This was tested under Docker, not yet under Podman.
+
 ### Known rough edges
 
-- Tools that ignore `HTTPS_PROXY` cannot reach the network at all. That is the safe failure, but some Node and Go programs need their own proxy setting.
-- On SELinux hosts add `,Z` to the project mount and `--security-opt label=disable` when using `--gpu`, as in NVIDIA's CDI example.
-- On the authoring machine, Docker refused to start any program with `no-new-privileges` set. Podman with crun was not available to compare. If containers fail with `operation not permitted` at start, test without that flag to isolate it.
+See [Troubleshooting](#troubleshooting). The two to expect first: tools that ignore `HTTPS_PROXY` cannot reach the network at all, which is the safe failure, and SELinux hosts need a relabelled project mount.
 
 ## Appendix B: GitHub permissions in detail
 
@@ -436,7 +542,7 @@ All the Claude Code issues are fixed, and none of those versions is a safe floor
 ### Why each managed key
 
 - **`allowManagedHooksOnly`.** The [hooks docs](https://code.claude.com/docs/en/hooks) say a project's `disableAllHooks: false` overrides a `true` in user settings. Two forms survive a hostile repo: `claude --settings '{"disableAllHooks": true}'` for one run, or this managed key permanently. It also neutralises the CVE-2026-25725 pattern, because a hook written into user or project settings from inside the sandbox never runs.
-- **`allowManagedMcpServersOnly` with an empty `allowedMcpServers`.** Per the managed settings docs, only allowlisted servers from managed settings are respected. MCP servers are separate processes started from a command line the repo chooses, so an empty list is the safe default. How an empty list behaves was not exercised here; confirm with `/mcp` in a repo that has a `.mcp.json`.
+- **`allowManagedMcpServersOnly` with an empty `allowedMcpServers`.** Per the managed settings docs, only allowlisted servers from managed settings are respected. MCP servers are separate processes started from a command line the repo chooses, so an empty list is the safe default. The [managed MCP docs](https://code.claude.com/docs/en/managed-mcp) state that an empty array means "No servers allowed". They also say to allow servers by `serverCommand` or `serverUrl`, because a `serverName` entry "is not a security control".
 - **Deny and ask rules.** Anthropic's docs say Bash patterns that constrain arguments are "fragile" and that a Bash rule "isn't a security boundary". [Ona showed](https://ona.com/stories/how-claude-code-escapes-its-own-denylist-and-sandbox) an agent reaching a denied binary through `/proc/self/root/...`. They are here to stop honest mistakes, such as the agent merging a pull request you wanted to review.
 
 ### Why each host setting
@@ -454,10 +560,6 @@ All the Claude Code issues are fixed, and none of those versions is a safe floor
 | `--setting-sources user` | Do not read the project's settings files or `.mcp.json`. Used by `--untrusted` |
 | `--bare` | Headless runs: no project hooks, skills, commands, subagents, plugins or MCP servers |
 | `disabledMcpjsonServers` (setting) | Reject a named `.mcp.json` server in every session type |
-
-### What was and was not tested
-
-`claude doctor` inside the built image reported no settings problems, which shows the managed file parses. Whether hooks and MCP servers are in fact blocked was not exercised. Before relying on it, put a harmless `SessionStart` hook and a `.mcp.json` in a scratch repo, start `agent-run.sh` there, and confirm neither runs.
 
 ## Appendix D: script and file index
 
@@ -482,6 +584,23 @@ The Anthropic hosts in the allowlists come from Claude Code's [network access re
 
 The pattern scan in `inspect-repo.sh` is a net for careless attacks. It will not catch an obfuscated payload, so it does not replace reading the flagged files.
 
+## Test status
+
+Checked on the authoring machine: Ubuntu 24.04, Docker 27.2, Claude Code 2.1.277, no Podman installed.
+
+| Piece | Status |
+| --- | --- |
+| All scripts | Pass `bash -n` |
+| `01-setup-podman.sh` | **Not run** |
+| `agent-run.sh` | **Not run under Podman.** Dry-run against a stub `podman` to check the commands it builds for trusted, GPU, perf and untrusted modes |
+| `02-github-single-repo.sh` | **Not run against GitHub.** URL parameters, permission names and ruleset fields checked against GitHub's docs |
+| Agent image | Builds and runs under Docker. Claude Code installs, `claude doctor` reports no settings problems, `perf --version` works, the git credential helper returns the token |
+| Proxy | Tested under Docker: allowlisted domains connect, `example.com` gets 403, plain HTTP gets 403, a container on the internal network has no direct route, the DNS include is parsed |
+| `03-claude-settings.sh` | Merge tested against a sample settings file |
+| `inspect-repo.sh` | Tested against a fabricated hostile repository (all 8 planted items flagged) and a clean one (0 flags, clean exit) |
+| Managed settings blocking hooks and MCP servers | Follows Anthropic's docs. **Not exercised.** Stage 3 says how to check it |
+| Podman-specific behaviour: internal-network DNS, two networks on the proxy, `keep-id` ownership, secrets as environment variables, the perf seccomp profile | From Podman's docs. **Not exercised** |
+
 ## Sources
 
 Pages opened on 2026-09-18. Security vendors cited here sell related products; their facts are used where a vendor doc or advisory agrees.
@@ -493,6 +612,7 @@ Pages opened on 2026-09-18. Security vendors cited here sell related products; t
 - [Configure permissions](https://code.claude.com/docs/en/permissions)
 - [Settings files and precedence](https://code.claude.com/docs/en/settings)
 - [Deploy managed settings](https://code.claude.com/docs/en/managed-settings)
+- [Control MCP server access](https://code.claude.com/docs/en/managed-mcp)
 - [Hooks](https://code.claude.com/docs/en/hooks)
 - [Network configuration and required hosts](https://code.claude.com/docs/en/network-config)
 - [Issue #13108: GPU device passthrough in sandbox mode](https://github.com/anthropics/claude-code/issues/13108)
@@ -515,6 +635,7 @@ Pages opened on 2026-09-18. Security vendors cited here sell related products; t
 
 **Containers and GPUs**
 
+- [Podman network create: internal networks and DNS](https://docs.podman.io/en/latest/markdown/podman-network-create.1.html)
 - [NVIDIA Container Toolkit CDI support](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/cdi-support.html)
 - [runc advisory, CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm)
 - [Wiz: NVIDIAScape, CVE-2025-23266](https://www.wiz.io/blog/nvidia-ai-vulnerability-cve-2025-23266-nvidiascape)

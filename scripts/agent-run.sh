@@ -5,7 +5,8 @@
 #
 #   --gpu        expose the NVIDIA GPU through CDI (adds the NVIDIA driver to the attack surface)
 #   --perf       allow perf_event_open so `perf stat` sees hardware counters
-#   --gvisor     run under gVisor (runsc must be installed and registered; no perf counters)
+#   --gvisor     EXPERIMENTAL: run under gVisor (runsc installed and registered with Podman).
+#                CPU only: no --gpu (rootless gVisor GPU support is broken upstream), no --perf
 #   --untrusted  for repos you have not reviewed: no GitHub token, no GPU, model-API-only
 #                network, separate Claude state, project hooks/MCP/skills not loaded
 #   --shell      start bash instead of claude (to look around or log in)
@@ -30,20 +31,35 @@ done
 if [ "$UNTRUSTED" = 1 ]; then
   NET=agent-untrusted  PROXY=agent-proxy-untrusted  ALLOW="$CFG_DIR/allowed-domains-untrusted.txt"
   HOME_VOL=agent-claude-home-untrusted      # never shares state with trusted sessions
-  [ "$GPU" = 1 ] && { echo "--gpu is refused with --untrusted (see Appendix A)"; exit 2; }
+  [ "$GPU" = 1 ] && { echo "--gpu is refused with --untrusted (see Appendix A of the guide)"; exit 2; }
 else
   NET=agent-internal   PROXY=agent-proxy            ALLOW="$CFG_DIR/allowed-domains.txt"
   HOME_VOL=agent-claude-home
 fi
 
+if [ "$GVISOR" = 1 ] && { [ "$GPU" = 1 ] || [ "$PERF" = 1 ]; }; then
+  echo "--gvisor cannot be combined with --gpu or --perf (see Appendix A of the guide)"; exit 2
+fi
+
 # ---- egress proxy: start it if it is not already running --------------------------------
+# DNS servers for the proxy: the host's real upstream resolvers (not the 127.0.0.53 stub,
+# which a container cannot reach). Falls back to public resolvers.
+write_proxy_dns() {
+  local servers
+  servers="$(awk '/^nameserver/{print $2}' /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null \
+             | grep -Ev '^(127\.|::1$)|%' | awk '!seen[$0]++' | head -n 3 | tr '\n' ' ')"
+  [ -n "${servers// /}" ] || servers="1.1.1.1 9.9.9.9"
+  echo "dns_nameservers $servers" > "$CFG_DIR/squid-dns.conf"
+}
 if ! podman container exists "$PROXY" || [ "$(podman inspect -f '{{.State.Running}}' "$PROXY")" != true ]; then
   podman rm -f "$PROXY" >/dev/null 2>&1 || true
+  write_proxy_dns
   # Attached to the internal network (where the agent lives) and to the default
   # network (the way out). The allowlist is mounted read-only.
   podman run -d --name "$PROXY" --network "$NET" --network podman \
     --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --security-opt=no-new-privileges \
     -v "$ALLOW":/etc/squid/allowed-domains.txt:ro \
+    -v "$CFG_DIR/squid-dns.conf":/etc/squid/dns.conf:ro \
     localhost/agent-proxy >/dev/null
 fi
 PROXY_URL="http://$PROXY:3128"
@@ -77,7 +93,7 @@ fi
 if [ "$UNTRUSTED" = 0 ] && ORIGIN="$(git -C "$PWD" remote get-url origin 2>/dev/null)"; then
   SLUG="$(printf '%s' "$ORIGIN" | sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##')"
   SECRET="gh-$(printf '%s' "$SLUG" | tr '/' '-' | tr -c 'a-zA-Z0-9_.-' '-')"
-  if podman secret exists "$SECRET" 2>/dev/null; then
+  if podman secret inspect "$SECRET" >/dev/null 2>&1; then
     ARGS+=( --secret "$SECRET,type=env,target=GH_TOKEN" )
     echo "GitHub token attached for $SLUG"
   else

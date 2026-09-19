@@ -11,7 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git gh jq less openssh-client ripgrep \
       python3 python3-pip python3-venv build-essential \
       linux-tools-generic \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Ubuntu's /usr/bin/perf is a wrapper that looks for tools matching the RUNNING kernel,
+    # which inside a container is the host's. Link the real binary so perf works on any host.
+    && ln -s "$(ls /usr/lib/linux-tools-*/perf | head -n1)" /usr/local/bin/perf
 
 # Fixed uid/gid 1000. The launcher maps your host user onto it with
 # --userns=keep-id:uid=1000,gid=1000, so files in the mounted project keep your ownership.

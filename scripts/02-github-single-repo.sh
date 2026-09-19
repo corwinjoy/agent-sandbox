@@ -14,7 +14,9 @@
 # GitHub has no API for creating fine-grained tokens, so the script opens the creation page
 # with everything pre-filled except the repository picker. You click three things, paste the
 # token back here, and the script verifies it and stores it as a Podman secret. The token is
-# never written to a file in your home directory or shown on screen.
+# never shown on screen or put in the project. Podman's default secret store is a file under
+# ~/.local/share/containers/storage/secrets: base64-encoded, NOT encrypted, readable only by
+# your user. 03-claude-settings.sh blocks host-side agent sessions from reading it.
 set -euo pipefail
 
 usage() { sed -n '2,17p' "$0"; exit "${1:-0}"; }
