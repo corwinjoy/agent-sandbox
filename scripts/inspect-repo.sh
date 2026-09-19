@@ -60,7 +60,13 @@ if [ -f .npmrc ]; then show .npmrc; fi
 hdr "Suspicious patterns in agent and editor config"
 SCAN=(); for p in .claude .mcp.json .vscode .cursor .devcontainer; do [ -e "$p" ] && SCAN+=("$p"); done
 HITS=""
-[ ${#SCAN[@]} -gt 0 ] && HITS="$(grep -rnIE 'curl |wget |nc |ncat |base64 (-d|--decode)|eval |/dev/tcp/|ANTHROPIC_BASE_URL|\.ssh/|id_rsa|AWS_SECRET' "${SCAN[@]}" 2>/dev/null | cut -c1-220 || true)"
+# Command names are matched as whole words, whatever follows them: a space, a tab, a quote
+# (JSON such as "command": "curl"), a semicolon or the end of the line.
+WORDS='curl|wget|nc|ncat|netcat|socat|eval|base64|xxd|openssl'
+# Interpreters only when asked to run inline code, to keep editor config noise down.
+INLINE='(ba|z|da)?sh[[:space:]]+-c|python[0-9.]*[[:space:]]+-c|(node|perl|ruby)[[:space:]]+-e|powershell|pwsh'
+PATTERN="(^|[^[:alnum:]_])($WORDS|$INLINE)([^[:alnum:]_-]|\$)|/dev/tcp/|ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|\\.ssh/|id_rsa|id_ed25519|AWS_SECRET|\\.aws/"
+[ ${#SCAN[@]} -gt 0 ] && HITS="$(grep -rnIE "$PATTERN" "${SCAN[@]}" 2>/dev/null | cut -c1-220 || true)"
 if [ -n "$HITS" ]; then printf '%s\n' "$HITS" | sed 's/^/  /'; flag "$(printf '%s\n' "$HITS" | wc -l) suspicious line(s) above"
 else echo "  none found"; fi
 

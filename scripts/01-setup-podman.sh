@@ -24,6 +24,16 @@ warn() { printf '  [WARN] %s\n' "$*" >&2; }
 ok()   { printf '  [ok] %s\n' "$*"; }
 # Version compare: ver_ge A B  -> true when A >= B
 ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]; }
+# The Nov 2025 runc fixes landed per release branch: 1.2.8, 1.3.3 and 1.4.0-rc.3.
+# A plain ">= 1.2.8" would wrongly pass 1.3.0-1.3.2 and the early 1.4.0 release candidates.
+runc_fixed() {
+  case "$1" in
+    1.4.0-rc.[12]) return 1 ;;
+    1.3.*) ver_ge "$1" 1.3.3 ;;
+    1.2.*) ver_ge "$1" 1.2.8 ;;
+    *)     ver_ge "$1" 1.4.0 ;;          # 1.4.0 final and later; anything below 1.2 fails
+  esac
+}
 
 # ---------------------------------------------------------------- 1. host checks
 say "Checking the host"
@@ -36,8 +46,8 @@ if id -nG | tr ' ' '\n' | grep -qx lxd; then
 fi
 if command -v runc >/dev/null; then
   RUNC_V="$(runc --version | awk 'NR==1{print $3}')"
-  ver_ge "$RUNC_V" 1.2.8 && ok "runc $RUNC_V" \
-    || warn "runc $RUNC_V predates the Nov 2025 escape fixes (need 1.2.8 / 1.3.3+). Matters if you keep using Docker: update Docker/containerd."
+  runc_fixed "$RUNC_V" && ok "runc $RUNC_V" \
+    || warn "runc $RUNC_V predates the Nov 2025 escape fixes (fixed in 1.2.8, 1.3.3 and 1.4.0-rc.3). Matters if you keep using Docker: update Docker/containerd."
 fi
 if command -v nvidia-ctk >/dev/null; then
   CTK_V="$(nvidia-ctk --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
@@ -61,15 +71,23 @@ ok "podman $PODMAN_V"
 
 # ---------------------------------------------------------------- 3. subuid / subgid
 say "Checking subordinate id ranges"
-for f in /etc/subuid /etc/subgid; do
-  if grep -q "^$USER:" "$f"; then ok "$f has an entry for $USER"
+# First id after every range already in the file (never below 100000), so a new range
+# cannot overlap another user's. Lines are name:start:count.
+next_free_id() { awk -F: '{e=$2+$3; if (e>m) m=e} END{print (m>100000 ? m : 100000)}' "$1" 2>/dev/null || echo 100000; }
+MIGRATE=0
+# Each file is handled on its own: a system with only one of the two entries keeps it.
+for pair in /etc/subuid:--add-subuids /etc/subgid:--add-subgids; do
+  f="${pair%%:*}" flag="${pair##*:}"
+  if grep -q "^$USER:" "$f" 2>/dev/null; then ok "$f has an entry for $USER"
   else
-    warn "$f has no entry for $USER; adding 65536 ids"
-    sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
-    podman system migrate
-    break
+    START="$(next_free_id "$f")"; END=$((START + 65535))
+    warn "$f has no entry for $USER; adding $START-$END"
+    sudo usermod "$flag" "$START-$END" "$USER"
+    MIGRATE=1
   fi
 done
+# Make running Podman pick up new ranges.
+if [ "$MIGRATE" = 1 ]; then podman system migrate; fi
 
 # ---------------------------------------------------------------- 4. GPU via CDI
 if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then

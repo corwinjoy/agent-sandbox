@@ -89,7 +89,7 @@ Each one lets code running as you skip the sandbox entirely. `01-setup-podman.sh
 | --- | --- | --- | --- |
 | Not in the `docker` group | `id -nG` | `docker` absent | `sudo gpasswd -d $USER docker`, then log out and in |
 | Not in the `lxd` group | `id -nG` | `lxd` absent | `sudo gpasswd -d $USER lxd` |
-| runc, only if you keep Docker installed | `runc --version` | 1.2.8, 1.3.3 or later | Update Docker Engine and containerd |
+| runc, only if you keep Docker installed | `runc --version` | 1.2.8 or later on the 1.2 branch, 1.3.3 or later on 1.3, or 1.4.0-rc.3 or later. Versions 1.3.0 to 1.3.2 are still vulnerable | Update Docker Engine and containerd |
 | NVIDIA Container Toolkit (GPU users) | `nvidia-ctk --version` | 1.17.8 or later | Update from NVIDIA's apt repository |
 | NVIDIA driver (GPU users) | `nvidia-smi` | A release from October 2025 or later. On the 580 branch that is 580.95.05 | Update the driver |
 | Claude Code on the host | `claude --version` | Current release | Leave auto-update on |
@@ -119,7 +119,7 @@ The script is safe to re-run. It uses `sudo` only for `apt` and for writing `/et
 | Piece | Purpose |
 | --- | --- |
 | `podman`, `uidmap`, `passt`, `slirp4netns`, `crun` | Rootless containers and their networking. `crun` is Podman's low-level runtime. Keep it updated through apt like any other package |
-| `/etc/subuid`, `/etc/subgid` entries | The id ranges user namespaces need |
+| `/etc/subuid`, `/etc/subgid` entries | The id ranges user namespaces need. Added only where missing, in a range no other user has |
 | `/etc/cdi/nvidia.yaml` | Lets a container request the GPU with `--device nvidia.com/gpu=all`. Regenerate it after each driver update by re-running the script |
 | `~/.config/agent-sandbox/seccomp-perf.json` | Podman's default seccomp profile plus `perf_event_open`. Used only with `--perf` |
 | `~/.config/agent-sandbox/allowed-domains*.txt` | The egress allowlists. Your copies; the script never overwrites them |
@@ -338,7 +338,7 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
    - `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`: hooks, `env` overrides such as `ANTHROPIC_BASE_URL`, pre-approved MCP servers, helper commands, shipped allow rules. A committed `settings.local.json` is suspicious in itself, because that file is normally gitignored.
    - `.vscode/tasks.json` tasks with `runOn: folderOpen`, and any `.devcontainer`.
    - `package.json` install-time scripts, `setup.py`, `.npmrc`, submodules.
-   - `curl`, `wget`, `nc`, `base64 -d`, `eval` and key paths in agent and editor config.
+   - Network and decoding tools (`curl`, `wget`, `nc`, `socat`, `base64`, `openssl`), `eval`, inline interpreters such as `sh -c` and `python -c`, and key paths, anywhere in agent and editor config. Names are matched as whole words, so `"command": "curl"` in JSON is caught too.
    - Invisible Unicode in `CLAUDE.md`, `AGENTS.md`, rules files and READMEs.
 
 2. **Read everything it flagged.** A flag is a prompt to read, not a verdict, and no flags is not a clean bill of health. Read `CLAUDE.md` and `AGENTS.md` in full: they are loaded into the agent's context as if you wrote them.
@@ -411,7 +411,7 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 ### Why not plain Docker
 
 - The Docker daemon runs as root and the `docker` group is root-equivalent.
-- Containers share the host kernel and are started by a privileged runtime. In November 2025 runc fixed [CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm) and two related bugs that let a hostile Dockerfile or container gain host root. Fixed in runc 1.2.8 and 1.3.3.
+- Containers share the host kernel and are started by a privileged runtime. In November 2025 runc fixed [CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm) and two related bugs that let a hostile Dockerfile or container gain host root. Fixed per release branch in runc 1.2.8, 1.3.3 and 1.4.0-rc.3.
 - The runc maintainers say rootless containers "entirely mitigate" that bug's privilege escalation, because an unprivileged runtime cannot write the procfs files the attack targets. That is the main reason for rootless.
 - Switching runtime is not the fix. Podman here uses crun, and the same advisory says crun and youki "may have similar security issues". Keep crun updated through apt. What protects you is that the runtime runs without privileges.
 - [CVE-2025-23266 "NVIDIAScape"](https://www.wiz.io/blog/nvidia-ai-vulnerability-cve-2025-23266-nvidiascape) (CVSS 9.0): a three-line Dockerfile got host root through the NVIDIA Container Toolkit's hook. Fixed in toolkit 1.17.8. It triggers when a container is created from an attacker's image, so never let the agent build or start containers on the host.

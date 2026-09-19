@@ -19,14 +19,16 @@
 # your user. 03-claude-settings.sh blocks host-side agent sessions from reading it.
 set -euo pipefail
 
-usage() { sed -n '2,17p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,19p' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 2
 REPO_SLUG="$1"; shift
 EXPIRES=30 CANARY="" PROTECT=0
+# An option that takes a value must be followed by one (and not by another option).
+need_arg() { [ $# -ge 2 ] && [ "${2#--}" = "$2" ] || { echo "option $1 needs a value" >&2; usage 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --expires-days) EXPIRES="$2"; shift ;;
-    --canary) CANARY="$2"; shift ;;
+    --expires-days) need_arg "$@"; EXPIRES="$2"; shift ;;
+    --canary) need_arg "$@"; CANARY="$2"; shift ;;
     --protect-default-branch) PROTECT=1 ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage 2 ;;
@@ -34,6 +36,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 [[ "$REPO_SLUG" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "expected OWNER/REPO" >&2; exit 2; }
+# GitHub accepts 1-366 days for expires_in.
+{ [[ "$EXPIRES" =~ ^[0-9]+$ ]] && [ "$EXPIRES" -ge 1 ] && [ "$EXPIRES" -le 366 ]; } \
+  || { echo "--expires-days must be a whole number from 1 to 366" >&2; exit 2; }
+[ -z "$CANARY" ] || [[ "$CANARY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "--canary expects OWNER/REPO" >&2; exit 2; }
 OWNER="${REPO_SLUG%%/*}"  REPO="${REPO_SLUG##*/}"
 SECRET="gh-$(printf '%s' "$REPO_SLUG" | tr '/' '-' | tr -c 'a-zA-Z0-9_.-' '-')"   # must match agent-run.sh
 API=https://api.github.com
