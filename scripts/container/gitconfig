@@ -1,0 +1,15 @@
+# System-wide git config inside the agent container.
+[credential "https://github.com"]
+	# Hand git the token from $GH_TOKEN. The launcher sets it from a Podman secret,
+	# and only in trusted mode. With no token attached, pushes simply fail.
+	helper = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && echo username=x-access-token && echo \"password=$GH_TOKEN\"; }; f"
+[url "https://github.com/"]
+	# The container has no SSH keys and no route except the HTTPS proxy,
+	# so rewrite SSH-style GitHub remotes to HTTPS.
+	insteadOf = git@github.com:
+	insteadOf = ssh://git@github.com/
+[safe]
+	directory = /workspace
+[core]
+	# Ignore any hooks that exist in the mounted repository.
+	hooksPath = /dev/null

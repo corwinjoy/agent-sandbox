@@ -1,0 +1,7 @@
+# Checkouts made by scripts/inspect-repo.sh
+untrusted/
+# Editor and OS noise
+*.swp
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,9 @@
+# Egress proxy: the only container with a route to the internet.
+# Squid allows CONNECT to port 443 for the listed domains and refuses everything else.
+FROM docker.io/library/ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends squid ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY squid.conf /etc/squid/squid.conf
+# The allowlist is mounted at run time so you can edit it without rebuilding.
+EXPOSE 3128
+CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]

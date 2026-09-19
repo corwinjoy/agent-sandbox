@@ -1,0 +1,6 @@
+# Domains for untrusted-repo mode: the model API and nothing else.
+# No GitHub, no registries. Add a registry only for the duration of an install.
+api.anthropic.com
+claude.ai
+claude.com
+platform.claude.com

@@ -1,0 +1,17 @@
+# Domains the agent container may reach (trusted-repo mode). Edit to fit your stack.
+# Claude Code: API, sign-in and token refresh.
+api.anthropic.com
+claude.ai
+claude.com
+platform.claude.com
+# GitHub over HTTPS: clone, fetch, push and the REST API.
+# github.com is also a place data can be sent TO. That is why the token is single-repo.
+github.com
+api.github.com
+codeload.github.com
+objects.githubusercontent.com
+raw.githubusercontent.com
+# Package registries. Remove the ones you do not use.
+registry.npmjs.org
+pypi.org
+files.pythonhosted.org
