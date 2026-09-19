@@ -305,43 +305,64 @@ The merge keeps your existing settings and unions lists. It sets:
 
 ### Test that the sandbox blocks a repository's hooks and MCP servers
 
-Run this once after Stage 1, and again after you change `managed-settings.json` or update Claude Code. It needs a logged-in sandbox, and it sends two one-line prompts.
+Run this once after Stage 1, and again after you change `managed-settings.json` or update Claude Code. It needs a logged-in sandbox and sends one one-line prompt per run.
 
 ```bash
-test-hook-blocking.sh
+test-hook-blocking.sh               # trusted mode: 2 runs
+test-hook-blocking.sh --untrusted   # also untrusted mode: 6 runs. Needs the untrusted login too
 ```
 
-**What it does.** It builds a throwaway repository that tries to run code the way a malicious clone would, then runs one short headless Claude session in it, twice.
+**What it does.** It builds a throwaway repository that tries to get at the agent the way a malicious clone would, then runs short headless Claude sessions in it.
 
 | The repository contains | What it tries |
 | --- | --- |
 | `.claude/settings.json` with `SessionStart`, `UserPromptSubmit` and `Stop` hooks | Each hook runs `touch /workspace/MARKER_hook_<name>` |
 | `.mcp.json` with a server named `probe`, plus `"enableAllProjectMcpServers": true` to pre-approve it | The server command runs `touch /workspace/MARKER_mcp_server_started` |
+| `CLAUDE.md` containing a made-up project codename | The test asks the model whether a codename is in its context |
 
 The payloads are harmless: each one only creates an empty marker file in the throwaway project directory, where the script can see it from the host. The directory is deleted afterwards.
 
-| Run | Setup | Expected |
-| --- | --- | --- |
-| 1. Control | The image's managed settings are replaced by `{}` for this one run | The markers appear. This proves the test can see a hook or an MCP server when one runs. Without it, "no markers" could just mean the test was broken |
-| 2. Real | The sandbox as shipped | No marker appears |
+The sessions are headless (`claude -p`) on purpose. That is the hardest case: it never shows the workspace trust dialog, so project hooks are used and `.mcp.json` servers connect without asking.
 
-The session is headless (`claude -p`) on purpose. That is the hardest case: it never shows the workspace trust dialog, so project hooks are used and `.mcp.json` servers connect without asking.
+**The runs.** Each protection is switched off in turn, so every layer is tested on its own, and each mode has a control that proves the test can see a hook when one runs. Without a control, "nothing ran" could just mean the test was broken.
+
+| Run | Mode | Managed settings | `--setting-sources user` | Must run | `CLAUDE.md` |
+| --- | --- | --- | --- | --- | --- |
+| 1. Control | Trusted | Replaced by `{}` | Not used in trusted mode | Hooks and MCP server | Loaded |
+| 2. As shipped | Trusted | On | Not used in trusted mode | Nothing | Loaded, by design |
+| 3. Control | Untrusted | Replaced by `{}` | Overridden to include the project | Hooks and MCP server | Loaded |
+| 4. Flag only | Untrusted | Replaced by `{}` | On | Nothing | Not loaded |
+| 5. Managed settings only | Untrusted | On | Overridden to include the project | Nothing | Loaded |
+| 6. As shipped | Untrusted | On | On | Nothing | Not loaded |
 
 **Expected output.**
 
 ```text
-1. CONTROL run, managed settings replaced by {} (markers expected)
-   ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started
-2. REAL run, sandbox as shipped (no marker allowed)
-   ran: nothing
+TRUSTED MODE
+1. control: managed settings replaced by {} (markers expected)
+   ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started    | CLAUDE.md: loaded
+2. as shipped (no marker allowed; CLAUDE.md is loaded in trusted mode by design)
+   ran: nothing   | CLAUDE.md: loaded
 
-PASS: without managed settings the repository ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started
-      with the sandbox as shipped it ran nothing.
+UNTRUSTED MODE
+3. control: no managed settings AND project settings forced back on (markers expected)
+   ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started    | CLAUDE.md: loaded
+4. only --setting-sources user: no managed settings (no marker allowed)
+   ran: nothing   | CLAUDE.md: not loaded
+5. only managed settings: project settings forced back on (no marker allowed)
+   ran: nothing   | CLAUDE.md: loaded
+6. as shipped: both layers (no marker allowed, CLAUDE.md must not load)
+   ran: nothing   | CLAUDE.md: not loaded
+
+PASS: the controls ran the repository's hooks and MCP server; every protected run ran nothing.
 ```
 
-`FAIL` means the sandbox let the repository run something; do not use it on untrusted code until you know why. `INCONCLUSIVE` means nothing ran even in the control, usually because the sandbox is not logged in.
+What the results mean:
 
-The control run is also a fair picture of what a hostile repository can do to a headless session with no managed settings: all three hooks and the MCP server ran, with no prompt of any kind.
+- **Either layer alone stops hooks and MCP servers** (runs 4 and 5). Untrusted mode really has two independent protections, not one.
+- **Only `--setting-sources user` keeps `CLAUDE.md` out of the model's context** (runs 4 and 6 against 5). In trusted mode a repository's `CLAUDE.md` is always loaded, as if you wrote it. That is one reason to review a repository before promoting it out of untrusted mode.
+- **The controls are a fair picture of the threat.** With no protection, a headless session ran all three hooks and started the repository's MCP server with no prompt of any kind.
+- `FAIL` means the sandbox let the repository run something: do not use it on untrusted code until you know why. `INCONCLUSIVE` means nothing ran even in a control, usually because that mode is not logged in.
 
 ## Daily use
 
@@ -424,7 +445,7 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
    - Network and decoding tools (`curl`, `wget`, `nc`, `socat`, `base64`, `openssl`), `eval`, inline interpreters such as `sh -c` and `python -c`, and key paths, anywhere in agent and editor config. Names are matched as whole words, so `"command": "curl"` in JSON is caught too.
    - Invisible Unicode in `CLAUDE.md`, `AGENTS.md`, rules files and READMEs.
 
-2. **Read everything it flagged.** A flag is a prompt to read, not a verdict, and no flags is not a clean bill of health. Read `CLAUDE.md` and `AGENTS.md` in full: they are loaded into the agent's context as if you wrote them.
+2. **Read everything it flagged.** A flag is a prompt to read, not a verdict, and no flags is not a clean bill of health. Read `CLAUDE.md` and `AGENTS.md` in full. Untrusted mode does not load the repository's `CLAUDE.md` automatically, but the agent can still open it, or any other file, while it works. Once you promote the repository to trusted mode, `CLAUDE.md` is loaded into every session as if you wrote it.
 
 3. **Start the agent in untrusted mode.** The first run asks for a separate Claude login, because untrusted sessions keep their own state.
 
@@ -439,7 +460,7 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
    | `--gpu` refused | Keeps the NVIDIA driver out of reach of unknown code |
    | Separate network and proxy, using `allowed-domains-untrusted.txt`: Anthropic endpoints only | No GitHub, no registries, so nowhere to send data |
    | Separate `agent-claude-home-untrusted` volume | Nothing the repository writes into Claude's state can affect later trusted sessions |
-   | `claude --setting-sources user` | The repository's `.claude/settings*.json` and `.mcp.json` are not read at all |
+   | `claude --setting-sources user` | The repository's `.claude/settings*.json`, `.mcp.json` and `CLAUDE.md` are not loaded at all |
    | Manual permission mode | Claude asks before each action. See [Permission mode](#permission-mode) |
    | Managed settings, as always | Hooks and MCP servers from any source stay blocked |
 
@@ -450,6 +471,8 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
 6. **Promote it once you have reviewed it.** Move the checkout out of `untrusted/`, create a token with Stage 2 if you need to push, and use plain `agent-run.sh`. If you open it in an editor, turn Workspace Trust on first. In Cursor, set `security.workspace.trust.enabled: true` and `task.allowAutomaticTasks: off`.
 
 7. **For code you consider hostile, use a VM or a throwaway cloud machine instead.** This container shares your kernel.
+
+**What untrusted mode does not stop.** Text the agent reads while it works, such as source files, READMEs, issue text pasted into the session and test output, can still carry instructions aimed at the model. Untrusted mode limits what a misled agent can do: no token, no network beyond the model API, no GPU, and a prompt before each action. Arguments you pass after `--` go to `claude` unchanged and can override the launcher's flags, so do not pass `--setting-sources` or `--permission-mode` yourself in untrusted mode. The managed settings hold either way.
 
 ## Troubleshooting
 
@@ -682,12 +705,13 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | Piece | Status |
 | --- | --- |
 | `01-setup-podman.sh` | Run once with a CUDA base image. Podman, both images, both networks and the CDI spec were created. The run exposed three bugs, now fixed: the CDI spec was unreadable by Podman 4.9, internal-network DNS forwarded outside names, and the perf seccomp profile had no effect. The fixed steps were applied by hand afterwards; the script has not been re-run from scratch |
-| `agent-run.sh`, trusted and untrusted modes | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets 403, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
+| `agent-run.sh`, trusted and untrusted modes, container properties | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets 403, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
 | `--perf` | Confirmed: counters blocked without the flag, real `cycles`, `instructions` and `cache-misses` with it |
 | `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
 | `--gvisor` | **Not run.** gVisor is not installed |
 | Claude Code itself inside the container | A logged-in session works through the proxy, interactively and headless (`-p`). Confirmed: trusted sessions start in auto mode, `--ask` starts in manual mode |
-| Managed settings blocking hooks and MCP servers | Confirmed with `test-hook-blocking.sh`. Control run (managed settings removed): three hooks and the MCP server ran. Sandbox as shipped: nothing ran. Trusted mode only; untrusted mode adds `--setting-sources user` on top and was not tested separately. The session also reported claude.ai connectors as blocked by the MCP allowlist |
+| Blocking a repository's hooks, MCP servers and `CLAUDE.md` | Confirmed with `test-hook-blocking.sh --untrusted`, six runs. Both controls ran three hooks and the MCP server. In untrusted mode each layer was tested alone: `--setting-sources user` by itself and the managed settings by themselves each ran nothing. `CLAUDE.md` reaches the model in trusted mode and does not in untrusted mode. The sessions also reported claude.ai connectors as blocked by the MCP allowlist |
+| Untrusted mode with a logged-in session | Confirmed: sign-in works through the Anthropic-only allowlist, and sessions start in manual permission mode |
 | `02-github-single-repo.sh` | Used once to create a real single-repository token, which works in the sandbox. Option handling tested. `--protect-default-branch` (the ruleset) has **not** been exercised |
 | `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
 | `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |

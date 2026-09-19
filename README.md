@@ -19,7 +19,8 @@ Early and partly tested. Read this before relying on it.
 | `agent-run.sh` | Trusted and untrusted modes confirmed under Podman: file ownership, no capabilities, allowlist, no direct route, no DNS. `--perf` and `--gpu --perf` confirmed |
 | `--gpu` | Confirmed: a CUDA kernel compiled and ran on the GPU inside the container. Needed a compatible CDI spec on Podman 4.9, which the setup script now installs |
 | Claude Code logged in inside the container | Confirmed, including auto mode by default and `--ask` for manual |
-| Managed settings blocking hooks and MCP servers | Confirmed with `test-hook-blocking.sh`, which includes a control run |
+| Blocking a repository's hooks, MCP servers and `CLAUDE.md` | Confirmed with `test-hook-blocking.sh --untrusted`: six runs with controls, each untrusted-mode layer tested on its own |
+| Untrusted mode with a logged-in session | Confirmed: sign-in works through the Anthropic-only allowlist; manual permission mode |
 | `02-github-single-repo.sh` | Used to create a real single-repository token. The branch ruleset option is **not yet exercised** |
 | `agent-run.sh --check-token` | Confirmed against a real token: works on its repository, cannot write anywhere else |
 | `03-claude-settings.sh`, `inspect-repo.sh` | Tested against sample inputs |
