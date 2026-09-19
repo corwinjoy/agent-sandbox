@@ -111,6 +111,19 @@ ARGS=(
   -e NO_PROXY=localhost,127.0.0.1
 )
 
+# Git hooks run on the HOST, with your privileges, the next time you use git there. Mount the
+# hooks directory read-only so nothing in the sandbox can plant one. (Inside the container
+# hooks never run: the image sets core.hooksPath=/dev/null.) Tools that install hooks, such as
+# husky or pre-commit, will report a read-only file system. Run those on the host yourself.
+GIT_CONFIG_BEFORE=""
+if [ -d "$PWD/.git" ]; then
+  mkdir -p "$PWD/.git/hooks"
+  ARGS+=( -v "$PWD/.git/hooks":/workspace/.git/hooks:ro )
+  # .git/config stays writable, because ordinary git use needs it (git push -u, new remotes).
+  # It can also make git run commands on the host, so keep a copy to compare after the session.
+  GIT_CONFIG_BEFORE="$(mktemp)"; cp "$PWD/.git/config" "$GIT_CONFIG_BEFORE" 2>/dev/null || : > "$GIT_CONFIG_BEFORE"
+fi
+
 # shellcheck disable=SC2206  # word splitting is intended here
 [ -n "${AGENT_RUN_EXTRA_ARGS:-}" ] && ARGS+=( $AGENT_RUN_EXTRA_ARGS )
 [ "$GPU" = 1 ]    && ARGS+=( --device nvidia.com/gpu=all )
@@ -144,18 +157,42 @@ fi
 #              injection attacks.
 if [ "$UNTRUSTED" = 1 ] || [ "$ASK" = 1 ]; then MODE=manual; else MODE=auto; fi
 
+# After the session: show what changed in .git/config and flag settings that make git run a
+# command, since git on the host will obey them. Runs on the host, after the container is gone.
+review_git_config() {
+  [ -n "$GIT_CONFIG_BEFORE" ] || return 0
+  if ! diff -q "$GIT_CONFIG_BEFORE" "$PWD/.git/config" >/dev/null 2>&1; then
+    {
+      echo
+      echo "agent-run: .git/config changed during this session:"
+      # `|| true`: diff exits 1 when the files differ, which is the case being reported.
+      diff -u "$GIT_CONFIG_BEFORE" "$PWD/.git/config" | sed -n '3,$p' | sed 's/^/    /' || true
+      RISKY="$(diff "$GIT_CONFIG_BEFORE" "$PWD/.git/config" | grep '^>' \
+               | grep -iE 'hookspath|fsmonitor|sshcommand|editor|pager|askpass|helper|program|textconv|driver|clean|smudge|process|command|uploadpack|receivepack|proxycommand|\[alias|\[include|insteadof|ext::|=[[:space:]]*!' || true)"
+      if [ -n "$RISKY" ]; then
+        echo "agent-run: WARNING: these new lines can make git run a command ON THE HOST. Check them"
+        echo "           before you run git in this checkout:"
+        printf '%s\n' "$RISKY" | sed 's/^> */    /'
+      fi
+    } >&2
+  fi
+  rm -f "$GIT_CONFIG_BEFORE"
+}
+# Run the container (not exec, so that the review above can happen afterwards).
+run() { local rc=0; podman run "$@" || rc=$?; review_git_config; exit "$rc"; }
+
 if [ "$CHECK_TOKEN" = 1 ]; then
   [ "$TOKEN_ATTACHED" = 1 ] || { echo "Nothing to check: no token is stored for this checkout's origin (${SLUG:-no GitHub origin found})." >&2; exit 1; }
   # The check script is mounted read-only from this directory, so it needs no image rebuild.
-  exec podman run "${ARGS[@]}" -e AGENT_REPO_SLUG="$SLUG" \
+  run "${ARGS[@]}" -e AGENT_REPO_SLUG="$SLUG" \
     -v "$HERE/container/check-github-token.sh":/usr/local/bin/check-github-token:ro \
     --entrypoint /bin/bash localhost/agent-claude /usr/local/bin/check-github-token "$@"
 elif [ "$SHELL_MODE" = 1 ]; then
-  exec podman run "${ARGS[@]}" --entrypoint /bin/bash localhost/agent-claude
+  run "${ARGS[@]}" --entrypoint /bin/bash localhost/agent-claude
 elif [ "$UNTRUSTED" = 1 ]; then
   # --setting-sources user: do not read the repo's .claude/settings*.json or .mcp.json.
   # Managed settings in the image already block hooks and MCP servers from every source.
-  exec podman run "${ARGS[@]}" localhost/agent-claude --permission-mode "$MODE" --setting-sources user "$@"
+  run "${ARGS[@]}" localhost/agent-claude --permission-mode "$MODE" --setting-sources user "$@"
 else
-  exec podman run "${ARGS[@]}" localhost/agent-claude --permission-mode "$MODE" "$@"
+  run "${ARGS[@]}" localhost/agent-claude --permission-mode "$MODE" "$@"
 fi

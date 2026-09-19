@@ -57,7 +57,7 @@ cd ~/src/myrepo && agent-run.sh                                # first run asks 
 ### What this does not give you
 
 - **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) says when to use a VM instead, and [Appendix E](#appendix-e-why-not-docker-sandboxes) compares this setup with Docker Sandboxes, which has its own kernel.
-- **The project directory is writable.** The agent can change any file in it, including build scripts and files under `.git/` such as hooks, which run with your privileges when you later use make or git on the host.
+- **The project directory is writable.** The agent can change any file in it, including build scripts that run with your privileges if you later run them on the host. Two git-specific routes are handled: `.git/hooks` is mounted read-only, and the launcher shows you what changed in `.git/config` after each session. See [Git hooks and git config](#git-hooks-and-git-config).
 - **`github.com` is on the allowlist,** so data can be sent there. The single-repo token limits where it can be written.
 
 ### Terms used in this guide
@@ -391,7 +391,27 @@ agent-run.sh -- -p "summarise this repo" > summary.txt   # headless; works from 
 
 `AGENT_RUN_EXTRA_ARGS` adds options to the `podman run` command, for example one more read-only mount: `AGENT_RUN_EXTRA_ARGS="-v $HOME/datasets:/data:ro" agent-run.sh`. Anything you add can weaken the sandbox, so keep mounts read-only and narrow.
 
-**Every run gets:** no Linux capabilities, `no-new-privileges`, a limit of 2048 processes and 16 GB of memory, a tmpfs `/tmp`, and your host user mapped to the container's `agent` user so files in the project keep your ownership. Claude's login and history live in the `agent-claude-home` volume, not in the project.
+**Every run gets:** a read-only `.git/hooks`, a review of `.git/config` changes when the session ends, no Linux capabilities, `no-new-privileges`, a limit of 2048 processes and 16 GB of memory, a tmpfs `/tmp`, and your host user mapped to the container's `agent` user so files in the project keep your ownership. Claude's login and history live in the `agent-claude-home` volume, not in the project.
+
+### Git hooks and git config
+
+Git runs hooks and obeys `.git/config` on the host, with your privileges, the next time you use git in the checkout. Both live inside the project directory, which the agent can write to, so the launcher treats them specially.
+
+- **`.git/hooks` is mounted read-only.** Nothing in the sandbox can add or change a hook, and the directory cannot be moved aside. Inside the container hooks never run anyway, because the image sets `core.hooksPath=/dev/null`. Tools that install hooks, such as husky or pre-commit, report `Read-only file system`; run their install step on the host yourself, after reading what they install.
+- **`.git/config` stays writable,** because ordinary git use needs it: `git push -u`, a new remote, a new branch. It can also make git run commands, for example through `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, an alias that starts with `!`, or a filter. So when a session ends, the launcher prints a diff of `.git/config` if it changed, and adds a warning that lists any new line able to run a command:
+
+```text
+agent-run: .git/config changed during this session:
+    +	hooksPath = /workspace/.evil-hooks
+    +[branch "feature"]
+    +	note = harmless
+agent-run: WARNING: these new lines can make git run a command ON THE HOST. Check them
+           before you run git in this checkout:
+    	hooksPath = /workspace/.evil-hooks
+```
+
+  Read it before you run git in that checkout. A changed branch or remote is normal; a new `hooksPath`, alias or helper is not. The warning is a pattern match, so treat the diff itself as the record.
+- This does not cover everything git reads. `.gitattributes` and `.gitmodules` are ordinary project files; review them in the diff like any other change.
 
 ### Permission mode
 
@@ -485,6 +505,7 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
 | `nvidia-smi` fails inside the container | CDI spec missing or stale after a driver update | Re-run `01-setup-podman.sh`, then check `nvidia-ctk cdi list` |
 | `perf stat` shows `<not supported>` or permission denied | `--perf` not passed, or `kernel.perf_event_paranoid` above 2 on the host | Pass `--perf`. On the host: `sudo sysctl kernel.perf_event_paranoid=2` |
 | Files in the project end up owned by a strange uid | Podman older than 4.3, so `--userns=keep-id:uid=...` was not honoured | Upgrade Podman |
+| `Read-only file system` when a tool writes to `.git/hooks` (husky, pre-commit, lefthook) | Deliberate: see [Git hooks and git config](#git-hooks-and-git-config) | Run the tool's hook-install step on the host, after reading what it installs |
 | `git push` asks for a username | No token attached. The launcher prints which repository it looked for | Run Stage 2 for that repository. Check that `git remote get-url origin` points at it |
 | Claude asks you to log in every time | The state volume is missing or was removed | `podman volume ls`. Use the same mode each time: trusted and untrusted modes have separate logins |
 | On SELinux hosts, permission denied on `/workspace` | The mount needs relabelling | Add `,Z` to the project mount in `agent-run.sh`. For `--gpu` also add `--security-opt label=disable`, as in NVIDIA's CDI example |
@@ -533,7 +554,8 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 | Only `$PWD` mounted | Reading `~/.ssh`, cloud credentials, browser profiles, other projects |
 | `--pids-limit`, `--memory` | Fork bombs and memory exhaustion |
 | Podman secret as `GH_TOKEN` | The token is not on a command line, in `podman inspect`, or in a file in the project |
-| `core.hooksPath=/dev/null` in the image | Git hooks the agent or a dependency wrote into `.git/hooks` |
+| `core.hooksPath=/dev/null` in the image | Hooks already in the repository running inside the container |
+| `.git/hooks` mounted read-only, `.git/config` reviewed after the session | A hook, or a git setting that runs a command, being planted for git on the host to execute later |
 
 ### The GPU trade-off
 
@@ -716,7 +738,7 @@ The pattern scan in `inspect-repo.sh` is a net for careless attacks. It will not
 | **The host GPU driver stays out of reach** | With VFIO the guest runs its own NVIDIA driver | With `--gpu`, code in the container sends ioctls straight to the host's NVIDIA kernel driver |
 | **Secrets never enter the sandbox** | A host-side proxy [injects credentials into outgoing requests](https://docs.docker.com/ai/sandboxes/security/). Code inside cannot read them | The GitHub token is an environment variable inside the container, so anything running there can read it. The limits are its single-repository scope, its expiry, and an allowlist that leaves few places to send it |
 | **A safe Docker daemon inside** | The agent can build and run containers against a private daemon in the VM | The agent cannot use containers at all, and must never be given the host's daemon |
-| **Clone mode** | `--clone` mounts the repository read-only and lets the agent work on a private copy, so it cannot touch your working tree | The project is mounted read-write. The agent can change build scripts, and files under `.git/` such as hooks, that later run on the host when you use git or make there |
+| **Clone mode** | `--clone` mounts the repository read-only and lets the agent work on a private copy, so it cannot touch your working tree | The project is mounted read-write, so the agent can change build scripts that you might later run on the host. `.git/hooks` is read-only and `.git/config` changes are shown to you, which closes the git routes but not the general one |
 | **Platforms** | macOS, Windows and Linux | Linux only |
 | **Someone else maintains it** | A supported product with documentation and releases | A few hundred lines of shell that you maintain, tested on one machine |
 
@@ -751,6 +773,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | --- | --- |
 | `01-setup-podman.sh` | Run from scratch with a CUDA base image after the fixes, and it worked. The first run had exposed three bugs, all fixed: the CDI spec was unreadable by Podman 4.9, internal-network DNS forwarded outside names, and the perf seccomp profile had no effect |
 | `agent-run.sh`, trusted and untrusted modes, container properties | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets 403, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
+| Read-only `.git/hooks` and the `.git/config` review | Confirmed: writing a hook and moving the hooks directory both fail inside the sandbox, commits and branch changes still work, a planted `core.hooksPath` and a `!` alias are flagged after the session, a benign change is shown without a warning, no change prints nothing, and the session's exit code is preserved |
 | `--perf` | Confirmed: counters blocked without the flag, real `cycles`, `instructions` and `cache-misses` with it |
 | `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
 | `--gvisor` | **Not run.** gVisor is not installed |

@@ -70,7 +70,7 @@ cd untrusted/project && agent-run.sh --untrusted           # no token, no GPU, m
 ## What this does not protect against
 
 - It is a shared-kernel sandbox. A Linux kernel or NVIDIA driver bug can still reach the host. Use a VM or a separate machine for code you consider hostile. The guide's [Appendix E](docs/setup-guide.md#appendix-e-why-not-docker-sandboxes) compares this with Docker Sandboxes, which is VM-based, and says when to pick which.
-- The project directory is mounted read-write. Anything the agent changes there, including build scripts, runs with your privileges if you run it on the host.
+- The project directory is mounted read-write. Anything the agent changes there, including build scripts, runs with your privileges if you run it on the host. Git's own routes are handled: `.git/hooks` is read-only, and `.git/config` changes are shown to you after each session.
 - `github.com` is on the trusted-mode allowlist, so data can be sent there. The single-repo token limits where.
 
 The guide's appendices cover these limits and the alternatives.
