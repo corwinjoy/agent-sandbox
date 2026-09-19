@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage 2: give the agent a GitHub credential that works on ONE repository only.
 #
-#   02-github-single-repo.sh OWNER/REPO [--expires-days N] [--canary OWNER/OTHER] [--protect-default-branch]
+#   02-github-single-repo.sh OWNER/REPO [--expires-days N] [--canary OWNER/OTHER]
 #
 # The token is a fine-grained personal access token with exactly these repository permissions:
 #   Contents: read/write        clone, fetch, commit, push
@@ -17,19 +17,22 @@
 # never shown on screen or put in the project. Podman's default secret store is a file under
 # ~/.local/share/containers/storage/secrets: base64-encoded, NOT encrypted, readable only by
 # your user. 03-claude-settings.sh blocks host-side agent sessions from reading it.
+#
+# Out of scope: branch protection. This token can push to any branch of the repository, so
+# whether the default branch needs pull requests or reviews is a setting of the repository.
 set -euo pipefail
 
-usage() { sed -n '2,19p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,22p' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 2
+case "$1" in -h|--help) usage ;; esac
 REPO_SLUG="$1"; shift
-EXPIRES=30 CANARY="" PROTECT=0
+EXPIRES=30 CANARY=""
 # An option that takes a value must be followed by one (and not by another option).
 need_arg() { [ $# -ge 2 ] && [ "${2#--}" = "$2" ] || { echo "option $1 needs a value" >&2; usage 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --expires-days) need_arg "$@"; EXPIRES="$2"; shift ;;
     --canary) need_arg "$@"; CANARY="$2"; shift ;;
-    --protect-default-branch) PROTECT=1 ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; usage 2 ;;
   esac
@@ -114,40 +117,6 @@ podman secret rm "$SECRET" >/dev/null 2>&1 || true
 printf '%s' "$TOKEN" | podman secret create "$SECRET" - >/dev/null
 unset TOKEN
 echo "Stored as Podman secret '$SECRET'."
-
-# ---------------------------------------------------------------- 5. optional: protect the default branch
-# Uses YOUR gh login on the host (needs admin on the repo), never the agent's token.
-# The ruleset stops force-pushes to, deletion of, and direct pushes to the default branch,
-# so the agent's work arrives as pull requests. Rulesets on private repos need a paid plan.
-if [ "$PROTECT" = 1 ]; then
-  if ! command -v gh >/dev/null; then
-    echo "gh CLI not found; skipping branch protection" >&2
-  elif gh api "repos/$REPO_SLUG/rulesets" --jq '.[].name' 2>/dev/null | grep -qx agent-guard-default-branch; then
-    echo "Ruleset 'agent-guard-default-branch' already exists."
-  else
-    gh api -X POST "repos/$REPO_SLUG/rulesets" --input - >/dev/null <<'JSON'
-{
-  "name": "agent-guard-default-branch",
-  "target": "branch",
-  "enforcement": "active",
-  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
-  "rules": [
-    { "type": "deletion" },
-    { "type": "non_fast_forward" },
-    { "type": "pull_request",
-      "parameters": {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": false,
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": false
-      } }
-  ]
-}
-JSON
-    echo "Ruleset 'agent-guard-default-branch' created."
-  fi
-fi
 
 cat <<EOF
 

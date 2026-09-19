@@ -11,21 +11,21 @@ and hardware perf counters.
 
 ## Status
 
-Early and partly tested. Read this before relying on it.
+Tested end to end on one machine. Read this before relying on it elsewhere.
 
 | Piece | Status |
 | --- | --- |
-| `01-setup-podman.sh` | Run once on Ubuntu 24.04 with Podman 4.9.3. Three bugs found and fixed; not yet re-run from scratch |
+| `01-setup-podman.sh` | Run from scratch on Ubuntu 24.04 with Podman 4.9.3, after fixing three bugs the first run exposed |
 | `agent-run.sh` | Trusted and untrusted modes confirmed under Podman: file ownership, no capabilities, allowlist, no direct route, no DNS. `--perf` and `--gpu --perf` confirmed |
 | `--gpu` | Confirmed: a CUDA kernel compiled and ran on the GPU inside the container. Needed a compatible CDI spec on Podman 4.9, which the setup script now installs |
 | Claude Code logged in inside the container | Confirmed, including auto mode by default and `--ask` for manual |
 | Blocking a repository's hooks, MCP servers and `CLAUDE.md` | Confirmed with `test-hook-blocking.sh --untrusted`: six runs with controls, each untrusted-mode layer tested on its own |
 | Untrusted mode with a logged-in session | Confirmed: sign-in works through the Anthropic-only allowlist; manual permission mode |
-| `02-github-single-repo.sh` | Used to create a real single-repository token. The branch ruleset option is **not yet exercised** |
+| `02-github-single-repo.sh` | Used twice to create real single-repository tokens |
 | `agent-run.sh --check-token` | Confirmed against a real token: works on its repository, cannot write anywhere else |
 | `03-claude-settings.sh`, `inspect-repo.sh` | Tested against sample inputs |
 
-Try it on a scratch repository first. The guide's [Test status](docs/setup-guide.md#test-status) section has the detail. Fixes are welcome.
+The guide's [Test status](docs/setup-guide.md#test-status) section has the detail. Fixes are welcome.
 
 ## Quick start
 
@@ -39,7 +39,7 @@ cd agent-sandbox
 export PATH="$PWD/scripts:$PATH"
 
 01-setup-podman.sh                                   # Stage 1: Podman, images, networks, GPU via CDI
-02-github-single-repo.sh OWNER/REPO --protect-default-branch   # Stage 2: single-repo token
+02-github-single-repo.sh OWNER/REPO                            # Stage 2: single-repo token
 (cd ~/src/myrepo && agent-run.sh --check-token)                # confirm it works there and nowhere else
 03-claude-settings.sh                                # Stage 3: harden Claude Code on the host
 

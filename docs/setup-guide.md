@@ -2,7 +2,7 @@
 
 Last updated 2026-09-18
 
-> **Status: partly tested.** Stage 1 and the launcher have been run on one machine (Ubuntu 24.04, Podman 4.9.3). The GitHub script and the blocking of repository hooks and MCP servers have not been exercised yet. [Test status](#test-status) lists exactly what was and was not checked. Try this on a scratch repository first.
+> **Status: tested on one machine.** All three stages, both launcher modes, GPU, perf counters, the token check and the hook-blocking test have been run on Ubuntu 24.04 with Podman 4.9.3. [Test status](#test-status) lists exactly what was checked and the few things that were not. Expect differences on other distributions and Podman versions.
 
 ## Overview
 
@@ -48,7 +48,7 @@ git clone https://github.com/corwinjoy/agent-sandbox.git && cd agent-sandbox
 export PATH="$PWD/scripts:$PATH"          # add this line to ~/.bashrc to keep it
 
 01-setup-podman.sh                                             # Stage 1, asks for sudo
-02-github-single-repo.sh OWNER/REPO --protect-default-branch   # Stage 2, opens a GitHub page
+02-github-single-repo.sh OWNER/REPO                            # Stage 2, opens a GitHub page
 03-claude-settings.sh                                          # Stage 3, host side
 
 cd ~/src/myrepo && agent-run.sh                                # first run asks you to log in to Claude
@@ -78,7 +78,7 @@ cd ~/src/myrepo && agent-run.sh                                # first run asks 
 ### Requirements
 
 - Ubuntu 24.04, or another apt-based distribution with **Podman 4.3 or later** and the netavark network backend. Ubuntu 22.04 ships Podman 3.4, which is too old. `01-setup-podman.sh` checks the version and stops if it is too old.
-- `git`, `curl`, `jq`. Optionally the `gh` CLI, logged in as yourself, for the branch-protection step in Stage 2.
+- `git`, `curl` and `jq` on the host.
 - For GPU work: an NVIDIA GPU with the driver and the NVIDIA Container Toolkit installed on the host.
 
 ### Fix these host problems first
@@ -155,7 +155,7 @@ Left off on purpose: Workflows (so it cannot edit `.github/workflows`), Administ
 **Run it.**
 
 ```bash
-02-github-single-repo.sh myorg/myrepo --protect-default-branch
+02-github-single-repo.sh myorg/myrepo
 ```
 
 What happens, step by step:
@@ -165,7 +165,6 @@ What happens, step by step:
 3. You generate the token and paste it into the script. The input is hidden.
 4. The script refuses classic (`ghp_`) tokens, confirms the repository is readable, prints the expiry, and fails if the token can see any other private repository.
 5. It stores the token as a Podman secret named `gh-OWNER-REPO`.
-6. With `--protect-default-branch` it uses your own `gh` login, not the agent's token, to add a ruleset: no force-push to, no deletion of, and no direct push to the default branch. The agent's work then arrives as pull requests. Rulesets on private repositories need a paid GitHub plan.
 
 Options: `--expires-days N` changes the expiry. `--canary OWNER/OTHER` names another private repository of yours and fails unless the token gets a 404 for it.
 
@@ -228,7 +227,7 @@ To probe a specific repository as well, name it after `--`: `agent-run.sh --chec
 
 **Rotate or revoke.** Re-run the script to rotate; it replaces the secret. To revoke, delete the token at <https://github.com/settings/personal-access-tokens> and run `podman secret rm gh-myorg-myrepo`.
 
-**Not yet run against GitHub.** The URL parameters, permission names and ruleset fields come from GitHub's docs. The check that lists private repositories is a heuristic. Try the script on a scratch repository first.
+**Branch protection is not part of this setup.** The token can push to any branch of its repository, including the default branch, and can merge a pull request. Whether the default branch requires pull requests, reviews or status checks is a setting of the repository, decided by its owners: see GitHub's [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) and [protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches). The sandbox's job is to make sure the agent holds a credential for one repository and nothing else. [Appendix B](#what-the-token-can-still-do) says what that credential can still do.
 
 ## Stage 3: Claude Code settings
 
@@ -277,7 +276,7 @@ To change them, edit [`scripts/container/managed-settings.json`](../scripts/cont
 
 To allow an MCP server you have vetted, add an entry to `allowedMcpServers` that pins what actually runs: `{ "serverCommand": ["npx", "-y", "some-server@1.2.3"] }` for a local server, which must match the command and arguments exactly, or `{ "serverUrl": "https://mcp.example.com/*" }` for a remote one. A remote server's domain also has to be on the proxy allowlist. Anthropic's docs say a `serverName` entry "is not a security control", because anyone can give any server that name.
 
-Bash permission rules match the command text, so they are a guard rail, not a boundary. The boundary is the token's permissions and the branch ruleset from Stage 2.
+Bash permission rules match the command text, so they are a guard rail, not a boundary. The boundary is the token's permissions, plus whatever branch protection the repository itself has.
 
 Claude Code's own Bash sandbox is left off inside the container. It needs a weaker nested mode there, and the container plus the proxy already do its job.
 
@@ -399,7 +398,7 @@ agent-run.sh -- -p "summarise this repo" > summary.txt   # headless; works from 
 The launcher starts Claude Code in **auto mode** for trusted sessions: a safety classifier approves routine actions instead of prompting you for each one. Anthropic describes the classifier as "a per-action control, not an isolation boundary", which is why it is the default only here, where the container, the proxy and the single-repo token limit what a wrongly approved action can do. Fewer prompts also means the ones you do see get read.
 
 - The managed rules from Stage 3 still hold in auto mode. Deny rules are evaluated first in every mode, so `gh pr merge` stays blocked, and Anthropic's docs say an ask rule still prompts "even in auto mode", so a force-push still asks you.
-- Two things are outside the container's protection, and in auto mode the classifier is the main per-action check on them: pushes and comments made with the GitHub token, and edits to files in the project. Add the branch ruleset in Stage 2, and review the diff before you run anything from the project on the host.
+- Two things are outside the container's protection, and in auto mode the classifier is the main per-action check on them: pushes and comments made with the GitHub token, and edits to files in the project. If that matters for a repository, protect its default branch in the repository's own settings, and review the diff before you run anything from the project on the host.
 - `--untrusted` always uses manual mode. Unreviewed code is where prompt injection is likeliest, and a classifier judges whether an action fits the request, which is exactly what an injection attacks.
 - The launcher passes `--permission-mode`, so the mode does not depend on a settings file inside the container. A `--permission-mode` you pass after `--` takes precedence. If auto mode is not available on your account, Claude Code falls back to prompting.
 - This applies inside the sandbox only. Do not make auto mode the default in your host `~/.claude/settings.json`: on the host, hooks and MCP servers run outside any boundary.
@@ -504,7 +503,7 @@ sudo rm -f /etc/cdi/nvidia.yaml                     # only if nothing else on th
 ls ~/.claude/settings.json.bak.*     # restore the backup you want over ~/.claude/settings.json
 ```
 
-Also delete the tokens at <https://github.com/settings/personal-access-tokens> and, if you added one, the `agent-guard-default-branch` ruleset in the repository's settings.
+Also delete the tokens at <https://github.com/settings/personal-access-tokens>.
 
 ## Appendix A: why rootless Podman, and its limits
 
@@ -602,12 +601,11 @@ From GitHub's [permissions reference for fine-grained tokens](https://docs.githu
 | Change settings, secrets, webhooks, collaborators | Administration and others | No |
 | Anything in another repository |  | No |
 
-### What the token can still do, and the mitigations
+### What the token can still do
 
-- **Merge its own pull request, push to any branch, delete branches.** Contents: write covers all of these; GitHub has no narrower level. `--protect-default-branch` adds a ruleset that blocks force-pushes to, deletion of, and direct pushes to the default branch, so changes arrive as pull requests. The managed settings deny `gh pr merge`.
-- **A solo developer cannot fully stop self-merge.** The token acts as you, and you are allowed to merge. On a team, set required approvals to 1 in the ruleset: the agent's pull requests are authored by your identity, and GitHub does not let an author approve their own pull request.
-- **Exfiltrate the repo's own contents** into a comment, a branch or a pull request. Single-repo scoping accepts this risk. Do not use this setup on a repo whose contents must not leak.
-- **Rulesets on private repos need a paid plan.** On a free private repo, rely on review before merging.
+- **Push to any branch, delete branches, and merge a pull request.** Contents: write covers all of these; GitHub has no narrower level. The managed settings deny `gh pr merge` as a guard rail, but the limit that counts is the repository's own branch protection. That is repository configuration, not part of this sandbox: if the default branch must only change through reviewed pull requests, set that up with GitHub's [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) or [protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
+- **Act as you.** The token carries your identity, so a rule that lets you push or merge lets the agent do it too. A required review does bind it, because GitHub does not let an author approve their own pull request. For a rule that separates you from the agent, give the agent its own identity, as below.
+- **Exfiltrate the repository's own contents** into a comment, a branch or a pull request. Single-repo scoping accepts this risk. Do not use this setup on a repository whose contents must not leak.
 
 ### Stronger: give the agent its own identity
 
@@ -680,7 +678,7 @@ Everything is in [`scripts/`](../scripts/). Put that directory on your `PATH`.
 | File | Purpose |
 | --- | --- |
 | [`01-setup-podman.sh`](../scripts/01-setup-podman.sh) | Stage 1: host checks, Podman install, CDI, seccomp profile, images, networks |
-| [`02-github-single-repo.sh`](../scripts/02-github-single-repo.sh) | Stage 2: single-repo fine-grained token, verification, Podman secret, optional branch ruleset |
+| [`02-github-single-repo.sh`](../scripts/02-github-single-repo.sh) | Stage 2: single-repo fine-grained token, verification, Podman secret |
 | [`03-claude-settings.sh`](../scripts/03-claude-settings.sh) | Stage 3, host side: merge hardening into `~/.claude/settings.json`; `--managed` installs host managed settings |
 | [`agent-run.sh`](../scripts/agent-run.sh) | Daily launcher: `--gpu`, `--perf`, `--gvisor`, `--untrusted`, `--shell` |
 | [`inspect-repo.sh`](../scripts/inspect-repo.sh) | Clone without executing anything and flag what the repo would auto-run |
@@ -704,7 +702,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 
 | Piece | Status |
 | --- | --- |
-| `01-setup-podman.sh` | Run once with a CUDA base image. Podman, both images, both networks and the CDI spec were created. The run exposed three bugs, now fixed: the CDI spec was unreadable by Podman 4.9, internal-network DNS forwarded outside names, and the perf seccomp profile had no effect. The fixed steps were applied by hand afterwards; the script has not been re-run from scratch |
+| `01-setup-podman.sh` | Run from scratch with a CUDA base image after the fixes, and it worked. The first run had exposed three bugs, all fixed: the CDI spec was unreadable by Podman 4.9, internal-network DNS forwarded outside names, and the perf seccomp profile had no effect |
 | `agent-run.sh`, trusted and untrusted modes, container properties | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets 403, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
 | `--perf` | Confirmed: counters blocked without the flag, real `cycles`, `instructions` and `cache-misses` with it |
 | `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
@@ -712,7 +710,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | Claude Code itself inside the container | A logged-in session works through the proxy, interactively and headless (`-p`). Confirmed: trusted sessions start in auto mode, `--ask` starts in manual mode |
 | Blocking a repository's hooks, MCP servers and `CLAUDE.md` | Confirmed with `test-hook-blocking.sh --untrusted`, six runs. Both controls ran three hooks and the MCP server. In untrusted mode each layer was tested alone: `--setting-sources user` by itself and the managed settings by themselves each ran nothing. `CLAUDE.md` reaches the model in trusted mode and does not in untrusted mode. The sessions also reported claude.ai connectors as blocked by the MCP allowlist |
 | Untrusted mode with a logged-in session | Confirmed: sign-in works through the Anthropic-only allowlist, and sessions start in manual permission mode |
-| `02-github-single-repo.sh` | Used once to create a real single-repository token, which works in the sandbox. Option handling tested. `--protect-default-branch` (the ruleset) has **not** been exercised |
+| `02-github-single-repo.sh` | Used twice to create real single-repository tokens, which work in the sandbox. Option handling tested |
 | `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
 | `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
