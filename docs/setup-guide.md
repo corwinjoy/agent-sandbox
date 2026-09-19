@@ -56,8 +56,8 @@ cd ~/src/myrepo && agent-run.sh                                # first run asks 
 
 ### What this does not give you
 
-- **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) says when to use a VM instead.
-- **The project directory is writable.** The agent can change any file in it, including build scripts you might later run on the host.
+- **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) says when to use a VM instead, and [Appendix E](#appendix-e-why-not-docker-sandboxes) compares this setup with Docker Sandboxes, which has its own kernel.
+- **The project directory is writable.** The agent can change any file in it, including build scripts and files under `.git/` such as hooks, which run with your privileges when you later use make or git on the host.
 - **`github.com` is on the allowlist,** so data can be sent there. The single-repo token limits where it can be written.
 
 ### Terms used in this guide
@@ -696,6 +696,53 @@ The Anthropic hosts in the allowlists come from Claude Code's [network access re
 
 The pattern scan in `inspect-repo.sh` is a net for careless attacks. It will not catch an obfuscated payload, so it does not replace reading the flagged files.
 
+## Appendix E: why not Docker Sandboxes
+
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (`sbx`) is the closest ready-made alternative, and on isolation strength it is the better tool: each sandbox is a microVM with its own kernel. This guide uses rootless Podman instead for three reasons that mattered for GPU and profiling work. If you need neither, read the last part of this appendix first. Everything here is as of September 2026; `sbx` is changing quickly.
+
+### The three reasons
+
+**1. The configuration is hard to inspect and can change underneath you.** The agent environment comes from a template image that Docker publishes ([`docker/sandbox-templates`](https://hub.docker.com/layers/docker/sandbox-templates/claude-code/images/)). You can look at its layers on Docker Hub, but that is not the same as reading a build file, and a template you pull by tag can be replaced without any change on your side. In this setup everything that defines the sandbox is a short text file in this repository, built on your machine: the [Containerfile](../scripts/container/Containerfile.agent), the [proxy rules](../scripts/container/squid.conf), the [allowlists](../scripts/container/allowed-domains.txt), the [managed settings](../scripts/container/managed-settings.json) and the [launcher](../scripts/agent-run.sh) with every `podman run` flag on its own commented line. Docker does offer "kits" for customising a sandbox, and marks that format experimental.
+
+**2. GPU access.** Docker's [GPU passthrough](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/) is experimental and works by handing the whole GPU to the VM over VFIO. It needs an x86_64 Linux host, IOMMU, the `iommufd` and `vfio_pci` modules, a driver bundle that must be rebuilt after every `sbx` upgrade, and in Docker's words "a GPU that nothing else is using". On the authoring laptop the install script was buggy and creating a GPU sandbox crashed the machine. Here, `agent-run.sh --gpu` shares the host's GPU through CDI: a CUDA kernel compiled and ran inside the container while the desktop kept running.
+
+**3. Hardware performance counters.** Inside a Docker Sandbox, `perf stat` reported `cycles`, `instructions` and `cache-misses` as `<not supported>`: the hypervisor does not pass the CPU's performance counters to the guest, so instructions-per-cycle and cache-miss analysis are not possible. Here, `agent-run.sh --perf` returned real values for all three on the same laptop. The cost is that the `perf_event_open` syscall is allowed in that session, and the host needs `kernel.perf_event_paranoid` at 2 or lower.
+
+### What Docker Sandboxes does better
+
+| Advantage | What it means | The situation in this setup |
+| --- | --- | --- |
+| **Its own kernel** | A Linux kernel bug or a container-runtime escape inside the sandbox does not reach the host. [NVIDIA's AI red team](https://developer.nvidia.com/blog/practical-security-guidance-for-sandboxing-agentic-workflows-and-managing-execution-risk/) recommends virtualization over shared-kernel sandboxes for exactly this reason | Shared kernel. This is the main weakness, and no configuration removes it |
+| **The host GPU driver stays out of reach** | With VFIO the guest runs its own NVIDIA driver | With `--gpu`, code in the container sends ioctls straight to the host's NVIDIA kernel driver |
+| **Secrets never enter the sandbox** | A host-side proxy [injects credentials into outgoing requests](https://docs.docker.com/ai/sandboxes/security/). Code inside cannot read them | The GitHub token is an environment variable inside the container, so anything running there can read it. The limits are its single-repository scope, its expiry, and an allowlist that leaves few places to send it |
+| **A safe Docker daemon inside** | The agent can build and run containers against a private daemon in the VM | The agent cannot use containers at all, and must never be given the host's daemon |
+| **Clone mode** | `--clone` mounts the repository read-only and lets the agent work on a private copy, so it cannot touch your working tree | The project is mounted read-write. The agent can change build scripts, and files under `.git/` such as hooks, that later run on the host when you use git or make there |
+| **Platforms** | macOS, Windows and Linux | Linux only |
+| **Someone else maintains it** | A supported product with documentation and releases | A few hundred lines of shell that you maintain, tested on one machine |
+
+Two things are roughly equal. Both put the whole agent, including a repository's hooks, inside the boundary. Both force all traffic through a deny-by-default proxy with a domain allowlist.
+
+### Other drawbacks of Docker Sandboxes
+
+- **Local MCP servers run on the host.** Docker's [security page](https://docs.docker.com/ai/sandboxes/security/) says local stdio MCP servers use host permissions, not the sandbox's. Here an MCP server runs inside the container, and none is allowed by default.
+- **The default allowlist is broad.** The same page notes that it includes wildcards such as `*.googleapis.com`, which cover much more than AI APIs. Review it with `sbx policy ls`. Here the allowlist is a short file of exact host names.
+- **Direct workspace mode has the same weakness as this setup.** Docker warns that in direct mode the agent can edit git hooks, CI configuration, IDE tasks, Makefiles and `package.json` scripts that later run on the host. Clone mode avoids it.
+- **Agent skills are shared across sandboxes,** which Docker describes as "a narrow exception to cross-sandbox isolation".
+- **It needs a Docker account** to sign in, and the central policy features are part of a paid plan. The `sbx` CLI itself is free.
+- **Parts of it are still moving.** The GPU flag, its driver bundle and the kit format are all marked experimental or subject to change.
+
+### Which to use
+
+| Your situation | Use |
+| --- | --- |
+| You need CUDA on a machine whose GPU is in use, or hardware perf counters | This setup |
+| You want to read and version every line that defines the sandbox | This setup |
+| No GPU and no profiling, and you want the strongest boundary with the least to maintain | Docker Sandboxes, or another VM-based option |
+| Code you consider hostile | Docker Sandboxes in `--clone` mode, a VM, or a Claude Code cloud session. Not this setup |
+| macOS or Windows | Docker Sandboxes |
+
+The two can coexist: this setup for daily GPU work on repositories you trust, and a VM-based sandbox for the occasional repository you do not.
+
 ## Test status
 
 Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aardvark-dns 1.4.0, crun), NVIDIA driver 580, NVIDIA Container Toolkit 1.20.1, Claude Code 2.1.278 in the image.
@@ -756,4 +803,5 @@ Pages opened on 2026-09-18. Security vendors cited here sell related products; t
 - [Quarkslab: NVIDIA GPU kernel driver exploit](https://blog.quarkslab.com/nvidia_gpu_kernel_vmalloc_exploit.html)
 - [gVisor GPU support](https://gvisor.dev/docs/user_guide/gpu/), [syscall compatibility](https://gvisor.dev/docs/user_guide/compatibility/linux/amd64/), [issue #11076](https://github.com/google/gvisor/issues/11076)
 - [Docker default seccomp profile](https://docs.docker.com/engine/security/seccomp/)
-- [Docker Sandboxes GPU passthrough](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/)
+- [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/), its [security model](https://docs.docker.com/ai/sandboxes/security/) and [GPU passthrough](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/)
+- [Docker: why microVMs](https://www.docker.com/blog/why-microvms-the-architecture-behind-docker-sandboxes/) and [Cloud Native Now: questions teams ask about Docker Sandboxes](https://cloudnativenow.com/contributed-content/the-questions-every-team-asks-about-docker-sandboxes/)
