@@ -186,16 +186,45 @@ URL+="&pull_requests=write"           # open PRs, comment on PRs
 
 **Inside the container** the token arrives as the `GH_TOKEN` environment variable. The image's `/etc/gitconfig` has a credential helper that hands it to git for `https://github.com` only. It also rewrites `git@github.com:` remotes to HTTPS, because the container has no SSH keys and no route except the proxy. The `gh` CLI reads `GH_TOKEN` by itself.
 
-**Check it worked.**
+**Check it worked.** From a checkout of the repository, on the host:
 
 ```bash
-podman secret ls                          # shows gh-myorg-myrepo
-cd ~/src/myrepo && agent-run.sh --shell   # prints "GitHub token attached for myorg/myrepo"
-# then, inside the container:
-gh api repos/myorg/myrepo --jq .full_name        # prints myorg/myrepo
-gh api repos/myorg/another-private-repo          # must fail with 404 Not Found
-git push --dry-run                               # no authentication error
+cd ~/src/myrepo
+agent-run.sh --check-token
 ```
+
+The repository name is taken from the checkout's `origin`, so there is nothing to fill in. The check runs inside the sandbox, because that is the only place the token exists. It never prints the token and changes nothing on GitHub.
+
+```text
+GitHub token attached for myorg/myrepo
+Token check for myorg/myrepo
+
+1. The token itself
+  [pass] fine-grained token
+  [pass] expires 2026-12-31 08:00:00 UTC
+
+2. What it can do on myorg/myrepo
+  [pass] API can read it (private repository)
+  [pass] git can fetch
+  [pass] git can push (Contents: write)
+
+3. What it can reach elsewhere
+  [pass] no other private repository is visible to the token
+  [pass] cannot push to myname/some-other-repo (HTTP 403)
+  ...
+RESULT: PASS
+```
+
+| Check | How | Fails when |
+| --- | --- | --- |
+| Token type and expiry | The `github_pat_` prefix, and the expiry header GitHub returns | It is a classic token. No expiry is a warning |
+| Read and push on the target | The REST API, then git's own HTTPS endpoints for fetch and for push. GitHub answers 200 only if this credential may do that operation. Nothing is pushed | The repository was not selected when the token was made. Push failing is a warning: the token is read-only |
+| No other private repository | Lists the private repositories the token can see | It sees any besides the target |
+| Cannot write anywhere else | Asks the push endpoint of up to three other repositories the token can list, which are usually your own, plus any you name | Any of them answers 200 |
+
+To probe a specific repository as well, name it after `--`: `agent-run.sh --check-token -- myorg/another-repo`.
+
+**Reading a public repository proves nothing.** Every token, and no token at all, can read public repositories, so `gh api repos/myorg/some-public-repo` succeeding does not mean the token was granted access to it. What matters is that it cannot write there, and cannot read other private repositories. The check tests exactly those two things.
 
 **Rotate or revoke.** Re-run the script to rotate; it replaces the secret. To revoke, delete the token at <https://github.com/settings/personal-access-tokens> and run `podman secret rm gh-myorg-myrepo`.
 
@@ -337,6 +366,7 @@ agent-run.sh -- -p "summarise this repo" > summary.txt   # headless; works from 
 | `--perf` | The seccomp profile that allows `perf_event_open` | That syscall can leak some host information, which is why it is blocked by default. The host also needs `kernel.perf_event_paranoid` at 2 or lower |
 | `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries, always manual permission mode |
 | `--shell` | bash instead of claude | |
+| `--check-token` | Runs the [Stage 2 token check](#stage-2-github-for-a-single-repository) for this checkout and exits | |
 | `--gvisor` | `--runtime=runsc`. Experimental | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Appendix A](#the-gpu-trade-off) |
 
 `AGENT_RUN_EXTRA_ARGS` adds options to the `podman run` command, for example one more read-only mount: `AGENT_RUN_EXTRA_ARGS="-v $HOME/datasets:/data:ro" agent-run.sh`. Anything you add can weaken the sandbox, so keep mounts read-only and narrow.
@@ -631,6 +661,7 @@ Everything is in [`scripts/`](../scripts/). Put that directory on your `PATH`.
 | [`03-claude-settings.sh`](../scripts/03-claude-settings.sh) | Stage 3, host side: merge hardening into `~/.claude/settings.json`; `--managed` installs host managed settings |
 | [`agent-run.sh`](../scripts/agent-run.sh) | Daily launcher: `--gpu`, `--perf`, `--gvisor`, `--untrusted`, `--shell` |
 | [`inspect-repo.sh`](../scripts/inspect-repo.sh) | Clone without executing anything and flag what the repo would auto-run |
+| [`container/check-github-token.sh`](../scripts/container/check-github-token.sh) | The token check. Run it with `agent-run.sh --check-token`; the launcher mounts it into the sandbox |
 | [`test-hook-blocking.sh`](../scripts/test-hook-blocking.sh) | Prove, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
 | [`container/Containerfile.agent`](../scripts/container/Containerfile.agent) | Agent image: Claude Code, git, gh, Python, build tools, non-root user |
 | [`container/Containerfile.proxy`](../scripts/container/Containerfile.proxy) | Egress proxy image (Squid) |
@@ -657,7 +688,8 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | `--gvisor` | **Not run.** gVisor is not installed |
 | Claude Code itself inside the container | A logged-in session works through the proxy, interactively and headless (`-p`). Confirmed: trusted sessions start in auto mode, `--ask` starts in manual mode |
 | Managed settings blocking hooks and MCP servers | Confirmed with `test-hook-blocking.sh`. Control run (managed settings removed): three hooks and the MCP server ran. Sandbox as shipped: nothing ran. Trusted mode only; untrusted mode adds `--setting-sources user` on top and was not tested separately. The session also reported claude.ai connectors as blocked by the MCP allowlist |
-| `02-github-single-repo.sh` | **Not run against GitHub.** URL parameters, permission names and ruleset fields checked against GitHub's docs. Option handling tested |
+| `02-github-single-repo.sh` | Used once to create a real single-repository token, which works in the sandbox. Option handling tested. `--protect-default-branch` (the ruleset) has **not** been exercised |
+| `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
 | `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
 

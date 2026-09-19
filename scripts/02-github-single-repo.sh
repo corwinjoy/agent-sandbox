@@ -152,6 +152,7 @@ fi
 cat <<EOF
 
 Done.
+  Check it:   cd <checkout of $REPO_SLUG> && agent-run.sh --check-token
   Use it:     cd <checkout of $REPO_SLUG> && agent-run.sh
   Rotate:     re-run this script (the old secret is replaced)
   Revoke:     https://github.com/settings/personal-access-tokens  and  podman secret rm $SECRET

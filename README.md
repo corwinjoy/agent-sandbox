@@ -20,7 +20,8 @@ Early and partly tested. Read this before relying on it.
 | `--gpu` | Confirmed: a CUDA kernel compiled and ran on the GPU inside the container. Needed a compatible CDI spec on Podman 4.9, which the setup script now installs |
 | Claude Code logged in inside the container | Confirmed, including auto mode by default and `--ask` for manual |
 | Managed settings blocking hooks and MCP servers | Confirmed with `test-hook-blocking.sh`, which includes a control run |
-| `02-github-single-repo.sh` | **Not yet run against GitHub** |
+| `02-github-single-repo.sh` | Used to create a real single-repository token. The branch ruleset option is **not yet exercised** |
+| `agent-run.sh --check-token` | Confirmed against a real token: works on its repository, cannot write anywhere else |
 | `03-claude-settings.sh`, `inspect-repo.sh` | Tested against sample inputs |
 
 Try it on a scratch repository first. The guide's [Test status](docs/setup-guide.md#test-status) section has the detail. Fixes are welcome.
@@ -38,6 +39,7 @@ export PATH="$PWD/scripts:$PATH"
 
 01-setup-podman.sh                                   # Stage 1: Podman, images, networks, GPU via CDI
 02-github-single-repo.sh OWNER/REPO --protect-default-branch   # Stage 2: single-repo token
+(cd ~/src/myrepo && agent-run.sh --check-token)                # confirm it works there and nowhere else
 03-claude-settings.sh                                # Stage 3: harden Claude Code on the host
 
 cd ~/src/myrepo

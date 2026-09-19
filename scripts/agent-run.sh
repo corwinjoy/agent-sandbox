@@ -15,6 +15,10 @@
 #                network, separate Claude state, project hooks/MCP/skills not loaded,
 #                and always manual permission mode
 #   --shell      start bash instead of claude (to look around or log in)
+#   --check-token  check the GitHub token attached for this checkout: what it can do on this
+#                repository, and that it can write nowhere else. The repository comes from
+#                `origin`. Extra repositories to probe go after --:
+#                  agent-run.sh --check-token -- OWNER/OTHER
 #
 # The project directory is the only host path the container sees.
 #
@@ -22,14 +26,16 @@
 #                             mount. Anything you add here can weaken the sandbox.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
-GPU=0 PERF=0 GVISOR=0 UNTRUSTED=0 SHELL_MODE=0 ASK=0
+GPU=0 PERF=0 GVISOR=0 UNTRUSTED=0 SHELL_MODE=0 ASK=0 CHECK_TOKEN=0 TOKEN_ATTACHED=0 SLUG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) GPU=1 ;; --perf) PERF=1 ;; --gvisor) GVISOR=1 ;;
     --untrusted) UNTRUSTED=1 ;; --shell) SHELL_MODE=1 ;; --ask) ASK=1 ;;
+    --check-token) CHECK_TOKEN=1 ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -45,6 +51,9 @@ else
   HOME_VOL=agent-claude-home
 fi
 
+if [ "$CHECK_TOKEN" = 1 ] && [ "$UNTRUSTED" = 1 ]; then
+  echo "--check-token makes no sense with --untrusted: untrusted sessions never get a token"; exit 2
+fi
 if [ "$GVISOR" = 1 ] && { [ "$GPU" = 1 ] || [ "$PERF" = 1 ]; }; then
   echo "--gvisor cannot be combined with --gpu or --perf (see Appendix A of the guide)"; exit 2
 fi
@@ -118,6 +127,7 @@ if [ "$UNTRUSTED" = 0 ] && ORIGIN="$(git -C "$PWD" remote get-url origin 2>/dev/
   SECRET="gh-$(printf '%s' "$SLUG" | tr '/' '-' | tr -c 'a-zA-Z0-9_.-' '-')"
   if podman secret inspect "$SECRET" >/dev/null 2>&1; then
     ARGS+=( --secret "$SECRET,type=env,target=GH_TOKEN" )
+    TOKEN_ATTACHED=1
     echo "GitHub token attached for $SLUG"
   else
     echo "No GitHub token for $SLUG (pushes will fail). Create one with 02-github-single-repo.sh $SLUG"
@@ -134,7 +144,13 @@ fi
 #              injection attacks.
 if [ "$UNTRUSTED" = 1 ] || [ "$ASK" = 1 ]; then MODE=manual; else MODE=auto; fi
 
-if [ "$SHELL_MODE" = 1 ]; then
+if [ "$CHECK_TOKEN" = 1 ]; then
+  [ "$TOKEN_ATTACHED" = 1 ] || { echo "Nothing to check: no token is stored for this checkout's origin (${SLUG:-no GitHub origin found})." >&2; exit 1; }
+  # The check script is mounted read-only from this directory, so it needs no image rebuild.
+  exec podman run "${ARGS[@]}" -e AGENT_REPO_SLUG="$SLUG" \
+    -v "$HERE/container/check-github-token.sh":/usr/local/bin/check-github-token:ro \
+    --entrypoint /bin/bash localhost/agent-claude /usr/local/bin/check-github-token "$@"
+elif [ "$SHELL_MODE" = 1 ]; then
   exec podman run "${ARGS[@]}" --entrypoint /bin/bash localhost/agent-claude
 elif [ "$UNTRUSTED" = 1 ]; then
   # --setting-sources user: do not read the repo's .claude/settings*.json or .mcp.json.
