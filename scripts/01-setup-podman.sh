@@ -13,7 +13,8 @@
 #   7. Creates the two internal (no-route-out, no-DNS) networks.
 #   8. Checks that Podman can resolve the GPU, and installs a compatible CDI spec if not.
 #
-# Safe to re-run. Uses sudo only for apt and for writing /etc/cdi.
+# Safe to re-run. Uses sudo for apt, for writing /etc/cdi, and for adding your /etc/subuid and
+# /etc/subgid entries if they are missing.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -38,14 +38,18 @@ git clone https://github.com/corwinjoy/agent-sandbox.git
 cd agent-sandbox
 export PATH="$PWD/scripts:$PATH"
 
-01-setup-podman.sh                                   # Stage 1: Podman, images, networks, GPU via CDI
-02-github-single-repo.sh OWNER/REPO                            # Stage 2: single-repo token
-(cd ~/src/myrepo && agent-run.sh --check-token)                # confirm it works there and nowhere else
-03-claude-settings.sh                                # Stage 3: harden Claude Code on the host
+01-setup-podman.sh                                # Stage 1: Podman, images, networks, GPU via CDI
+02-github-single-repo.sh OWNER/REPO               # Stage 2: single-repo token
+(cd ~/src/myrepo && agent-run.sh --check-token)   # confirm it works there and nowhere else
+03-claude-settings.sh                             # Stage 3: harden Claude Code on the host
+test-hook-blocking.sh                             # after your first login: prove repo hooks are blocked
 
 cd ~/src/myrepo
-agent-run.sh              # the first run asks you to log in to Claude; add --gpu and --perf as needed
+agent-run.sh                                      # the first run asks you to log in to Claude
+agent-run.sh --gpu --perf                         # CUDA and hardware perf counters
 ```
+
+For the CUDA toolkit inside the container, run Stage 1 as `BASE_IMAGE=docker.io/nvidia/cuda:12.6.3-devel-ubuntu24.04 01-setup-podman.sh`.
 
 For a repository you have not reviewed:
 
@@ -58,19 +62,17 @@ cd untrusted/project && agent-run.sh --untrusted           # no token, no GPU, m
 
 | Path | Contents |
 | --- | --- |
-| [`docs/setup-guide.md`](docs/setup-guide.md) | The developer guide: three stages, daily use, untrusted repositories, and appendices with the reasoning and sources |
+| [`docs/setup-guide.md`](docs/setup-guide.md) | The developer guide: three stages, daily use, untrusted repositories, troubleshooting, a comparison with the alternatives, and appendices with the reasoning and sources |
 | [`scripts/01-setup-podman.sh`](scripts/01-setup-podman.sh) | Host checks, Podman install, NVIDIA CDI spec, perf seccomp profile, images, internal networks |
 | [`scripts/02-github-single-repo.sh`](scripts/02-github-single-repo.sh) | Fine-grained token for one repo (read, commit, push, comment), verified and stored as a Podman secret |
 | [`scripts/03-claude-settings.sh`](scripts/03-claude-settings.sh) | Merges sandbox and credential hardening into `~/.claude/settings.json` |
-| [`scripts/agent-run.sh`](scripts/agent-run.sh) | Launcher. Trusted sessions start in auto permission mode, untrusted ones in manual. Flags: `--gpu`, `--perf`, `--ask`, `--untrusted`, `--shell`, and an experimental CPU-only `--gvisor` |
+| [`scripts/agent-run.sh`](scripts/agent-run.sh) | Launcher. Trusted sessions start in auto permission mode, untrusted ones in manual. Flags: `--gpu`, `--perf`, `--ask`, `--untrusted`, `--shell`, `--check-token`, and an experimental, untested CPU-only `--gvisor` |
 | [`scripts/inspect-repo.sh`](scripts/inspect-repo.sh) | Reviews a repository's agent config, editor tasks and install scripts before anything opens it |
 | [`scripts/test-hook-blocking.sh`](scripts/test-hook-blocking.sh) | Checks, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
-| [`scripts/container/`](scripts/container/) | Containerfiles, Squid config, domain allowlists, git config, Claude Code managed settings |
+| [`scripts/container/`](scripts/container/) | Containerfiles, Squid config, domain allowlists, git config, Claude Code managed settings, and the token check that `--check-token` runs |
 
 ## What this does not protect against
 
-- It is a shared-kernel sandbox. A Linux kernel or NVIDIA driver bug can still reach the host. Use a VM or a separate machine for code you consider hostile. The guide's [Appendix E](docs/setup-guide.md#appendix-e-why-not-docker-sandboxes) compares this with Docker Sandboxes, which is VM-based, and says when to pick which.
+- It is a shared-kernel sandbox. A Linux kernel or NVIDIA driver bug can still reach the host. Use a VM or a separate machine for code you consider hostile. The guide's [Alternatives](docs/setup-guide.md#alternatives) section compares this with the built-in Claude Code sandbox, plain Docker, gVisor, Docker Sandboxes and VMs, and says when to pick which.
 - The project directory is mounted read-write. Anything the agent changes there, including build scripts, runs with your privileges if you run it on the host. Git's own routes are handled: `.git/hooks` is read-only, and `.git/config` changes are shown to you after each session.
 - `github.com` is on the trusted-mode allowlist, so data can be sent there. The single-repo token limits where.
-
-The guide's appendices cover these limits and the alternatives.

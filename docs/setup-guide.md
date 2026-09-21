@@ -56,7 +56,7 @@ cd ~/src/myrepo && agent-run.sh                                # first run asks 
 
 ### What this does not give you
 
-- **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) says when to use a VM instead, and [Appendix E](#appendix-e-why-not-docker-sandboxes) compares this setup with Docker Sandboxes, which has its own kernel.
+- **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Alternatives](#alternatives) says when to use a VM-based sandbox instead.
 - **The project directory is writable.** The agent can change any file in it, including build scripts that run with your privileges if you later run them on the host. Two git-specific routes are handled: `.git/hooks` is mounted read-only, and the launcher shows you what changed in `.git/config` after each session. See [Git hooks and git config](#git-hooks-and-git-config).
 - **`github.com` is on the allowlist,** so data can be sent there. The single-repo token limits where it can be written.
 
@@ -94,11 +94,11 @@ Each one lets code running as you skip the sandbox entirely. `01-setup-podman.sh
 | NVIDIA driver (GPU users) | `nvidia-smi` | A release from October 2025 or later. On the 580 branch that is 580.95.05 | Update the driver |
 | Claude Code on the host | `claude --version` | Current release | Leave auto-update on |
 
-**Why.** Membership of the `docker` or `lxd` group is root on the host: `docker run -v /:/host` needs no password. Older runc and NVIDIA toolkit versions have published container escapes to host root. [Appendix A](#appendix-a-why-rootless-podman-and-its-limits) has the CVE details.
+**Why.** Membership of the `docker` or `lxd` group is root on the host: `docker run -v /:/host` needs no password. Older runc and NVIDIA toolkit versions have published container escapes to host root. [Appendix A](#appendix-a-how-the-sandbox-is-built-and-its-limits) has the CVE details.
 
 ## Stage 1: Podman
 
-**Why.** Claude Code's built-in sandbox covers Bash commands only. Hooks and MCP servers run on the host as you, and the sandbox cannot expose a GPU. Putting the whole agent in a container covers all three. Rootless Podman has no root daemon and no root-equivalent group, so a container-runtime bug lands an attacker in your unprivileged account, not in root. Details in [Appendix A](#appendix-a-why-rootless-podman-and-its-limits).
+**Why.** Claude Code's built-in sandbox covers Bash commands only. Hooks and MCP servers run on the host as you, and the sandbox cannot expose a GPU. Putting the whole agent in a container covers all three. Rootless Podman has no root daemon and no root-equivalent group, so a container-runtime bug lands an attacker in your unprivileged account, not in root. [Alternatives](#alternatives) compares the other options, and [Appendix A](#appendix-a-how-the-sandbox-is-built-and-its-limits) explains the design.
 
 **Run it.**
 
@@ -112,7 +112,7 @@ If you need the CUDA toolkit (`nvcc`, headers) inside the container, build on a 
 BASE_IMAGE=docker.io/nvidia/cuda:12.6.3-devel-ubuntu24.04 01-setup-podman.sh
 ```
 
-The script is safe to re-run. It uses `sudo` only for `apt` and for writing `/etc/cdi`.
+The script is safe to re-run. It uses `sudo` for `apt`, for writing `/etc/cdi`, and for adding your `/etc/subuid` and `/etc/subgid` entries if they are missing.
 
 **What it sets up.**
 
@@ -214,12 +214,7 @@ Token check for myorg/myrepo
 RESULT: PASS
 ```
 
-| Check | How | Fails when |
-| --- | --- | --- |
-| Token type and expiry | The `github_pat_` prefix, and the expiry header GitHub returns | It is a classic token. No expiry is a warning |
-| Read and push on the target | The REST API, then git's own HTTPS endpoints for fetch and for push. GitHub answers 200 only if this credential may do that operation. Nothing is pushed | The repository was not selected when the token was made. Push failing is a warning: the token is read-only |
-| No other private repository | Lists the private repositories the token can see | It sees any besides the target |
-| Cannot write anywhere else | Asks the push endpoint of up to three other repositories the token can list, which are usually your own, plus any you name | Any of them answers 200 |
+The read and push checks ask git's own HTTPS endpoints whether this credential may fetch or push; GitHub answers 200 only if it may, and nothing is pushed. The "elsewhere" checks list the private repositories the token can see, then ask the push endpoint of up to three other repositories it can list, which are usually your own. Any `[FAIL]` line says what to do.
 
 To probe a specific repository as well, name it after `--`: `agent-run.sh --check-token -- myorg/another-repo`.
 
@@ -325,7 +320,7 @@ The sessions are headless (`claude -p`) on purpose. That is the hardest case: it
 
 **The runs.** Each protection is switched off in turn, so every layer is tested on its own, and each mode has a control that proves the test can see a hook when one runs. Without a control, "nothing ran" could just mean the test was broken.
 
-| Run | Mode | Managed settings | `--setting-sources user` | Must run | `CLAUDE.md` |
+| Run | Mode | Managed settings | `--setting-sources user` | What runs | `CLAUDE.md` |
 | --- | --- | --- | --- | --- | --- |
 | 1. Control | Trusted | Replaced by `{}` | Not used in trusted mode | Hooks and MCP server | Loaded |
 | 2. As shipped | Trusted | On | Not used in trusted mode | Nothing | Loaded, by design |
@@ -334,27 +329,7 @@ The sessions are headless (`claude -p`) on purpose. That is the hardest case: it
 | 5. Managed settings only | Untrusted | On | Overridden to include the project | Nothing | Loaded |
 | 6. As shipped | Untrusted | On | On | Nothing | Not loaded |
 
-**Expected output.**
-
-```text
-TRUSTED MODE
-1. control: managed settings replaced by {} (markers expected)
-   ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started    | CLAUDE.md: loaded
-2. as shipped (no marker allowed; CLAUDE.md is loaded in trusted mode by design)
-   ran: nothing   | CLAUDE.md: loaded
-
-UNTRUSTED MODE
-3. control: no managed settings AND project settings forced back on (markers expected)
-   ran: hook_SessionStart hook_Stop hook_UserPromptSubmit mcp_server_started    | CLAUDE.md: loaded
-4. only --setting-sources user: no managed settings (no marker allowed)
-   ran: nothing   | CLAUDE.md: not loaded
-5. only managed settings: project settings forced back on (no marker allowed)
-   ran: nothing   | CLAUDE.md: loaded
-6. as shipped: both layers (no marker allowed, CLAUDE.md must not load)
-   ran: nothing   | CLAUDE.md: not loaded
-
-PASS: the controls ran the repository's hooks and MCP server; every protected run ran nothing.
-```
+The script prints what ran in each of these, then `PASS`, `FAIL` or `INCONCLUSIVE`.
 
 What the results mean:
 
@@ -387,7 +362,7 @@ agent-run.sh -- -p "summarise this repo" > summary.txt   # headless; works from 
 | `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries, always manual permission mode |
 | `--shell` | bash instead of claude | |
 | `--check-token` | Runs the [Stage 2 token check](#stage-2-github-for-a-single-repository) for this checkout and exits | |
-| `--gvisor` | `--runtime=runsc`. Experimental | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Appendix A](#the-gpu-trade-off) |
+| `--gvisor` | `--runtime=runsc`. Experimental and untested | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Why not gVisor](#why-not-gvisor) |
 
 `AGENT_RUN_EXTRA_ARGS` adds options to the `podman run` command, for example one more read-only mount: `AGENT_RUN_EXTRA_ARGS="-v $HOME/datasets:/data:ro" agent-run.sh`. Anything you add can weaken the sandbox, so keep mounts read-only and narrow.
 
@@ -489,7 +464,7 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
 
 6. **Promote it once you have reviewed it.** Move the checkout out of `untrusted/`, create a token with Stage 2 if you need to push, and use plain `agent-run.sh`. If you open it in an editor, turn Workspace Trust on first. In Cursor, set `security.workspace.trust.enabled: true` and `task.allowAutomaticTasks: off`.
 
-7. **For code you consider hostile, use a VM or a throwaway cloud machine instead.** This container shares your kernel.
+7. **For code you consider hostile, use a VM-based sandbox or a throwaway cloud machine instead.** This container shares your kernel. See [Alternatives](#alternatives).
 
 **What untrusted mode does not stop.** Text the agent reads while it works, such as source files, READMEs, issue text pasted into the session and test output, can still carry instructions aimed at the model. Untrusted mode limits what a misled agent can do: no token, no network beyond the model API, no GPU, and a prompt before each action. Arguments you pass after `--` go to `claude` unchanged and can override the launcher's flags, so do not pass `--setting-sources` or `--permission-mode` yourself in untrusted mode. The managed settings hold either way.
 
@@ -526,23 +501,64 @@ ls ~/.claude/settings.json.bak.*     # restore the backup you want over ~/.claud
 
 Also delete the tokens at <https://github.com/settings/personal-access-tokens>.
 
-## Appendix A: why rootless Podman, and its limits
+## Alternatives
 
-Rootless Podman is the strongest option that still gives CUDA on a single-GPU machine and hardware perf counters. It is not the strongest sandbox; it is the best fit for daily GPU work.
+This setup is one point in a range. It was chosen because it is the strongest option that still gives CUDA on a GPU the desktop is using, plus hardware perf counters. If you need neither, a VM-based option is the better sandbox.
 
-### Why not the built-in Claude Code sandbox alone
+| Option | Boundary | Covers hooks and MCP servers | CUDA on a GPU that is in use | Hardware perf counters | Main catch |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code's built-in sandbox (`/sandbox`) | Shared kernel, per Bash command | No | No | Yes | Bash only |
+| Anthropic `sandbox-runtime` (`srt`) | Shared kernel, whole process | Yes | No | Yes | Beta. No device access |
+| Plain Docker container or dev container | Shared kernel, root daemon | Yes | Yes | Only with a custom seccomp profile | The `docker` group is root on the host, and runtime escapes land in a root daemon |
+| **This setup: rootless Podman, proxy, single-repo token** | Shared kernel, unprivileged runtime | Yes | Yes | Yes, with `--perf` | Kernel and NVIDIA driver bugs can still reach the host |
+| gVisor (`runsc`) | User-space kernel in front of the host kernel | Yes | Only rootful, and unofficial on GeForce | No | No GPU in a rootless setup |
+| Docker Sandboxes (`sbx`) | Own kernel (microVM) | Agent yes. Local MCP servers run on the host | No: needs a GPU nothing else is using | No | Opaque template. GPU support is experimental |
+| Your own VM with GPU passthrough (libvirt, Kata) | Own kernel | Yes | No: the GPU leaves the host while the VM runs | Not verified | Most setup effort. Fragile on laptops |
+| Separate GPU machine or cloud GPU instance | Different hardware | Yes | Yes | Yes on bare metal | Cost, and whatever credentials you copy there |
+| Claude Code cloud session | Anthropic-managed VM | Yes | No GPU | Not checked | Not for GPU work |
 
-- It wraps Bash commands only. Anthropic's docs say MCP servers and command hooks ["run unconstrained on the host"](https://code.claude.com/docs/en/sandbox-environments), and recommend a container, VM or the sandbox runtime for unattended work.
-- It builds a fresh `/dev` with no NVIDIA device nodes. [Issue #13108](https://github.com/anthropics/claude-code/issues/13108), open since December 2025, asks for device passthrough and has no workaround other than disabling the sandbox.
-- By default it falls back to unsandboxed when dependencies are missing and lets failed commands retry outside the sandbox. Stage 3 turns both off on the host.
+### Which to use
 
-### Why not plain Docker
+| Your situation | Use |
+| --- | --- |
+| CUDA on a machine whose GPU is in use, or hardware perf counters, on repositories you trust | This setup: `agent-run.sh --gpu --perf` |
+| You want to read and version every line that defines the sandbox | This setup |
+| A repository you have not reviewed, no GPU needed | `agent-run.sh --untrusted` |
+| No GPU and no profiling, and you want the strongest boundary with the least to maintain | Docker Sandboxes, or another VM-based option |
+| Code you consider hostile | Docker Sandboxes in `--clone` mode, your own VM, or a Claude Code cloud session. Not this setup |
+| Untrusted code that needs a GPU | A separate machine or cloud GPU instance that holds no credentials |
+| macOS or Windows | Docker Sandboxes |
 
-- The Docker daemon runs as root and the `docker` group is root-equivalent.
-- Containers share the host kernel and are started by a privileged runtime. In November 2025 runc fixed [CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm) and two related bugs that let a hostile Dockerfile or container gain host root. Fixed per release branch in runc 1.2.8, 1.3.3 and 1.4.0-rc.3.
-- The runc maintainers say rootless containers "entirely mitigate" that bug's privilege escalation, because an unprivileged runtime cannot write the procfs files the attack targets. That is the main reason for rootless.
-- Switching runtime is not the fix. Podman here uses crun, and the same advisory says crun and youki "may have similar security issues". Keep crun updated through apt. What protects you is that the runtime runs without privileges.
-- [CVE-2025-23266 "NVIDIAScape"](https://www.wiz.io/blog/nvidia-ai-vulnerability-cve-2025-23266-nvidiascape) (CVSS 9.0): a three-line Dockerfile got host root through the NVIDIA Container Toolkit's hook. Fixed in toolkit 1.17.8. It triggers when a container is created from an attacker's image, so never let the agent build or start containers on the host.
+The options can coexist: this setup for daily GPU work on repositories you trust, and a VM-based sandbox for the occasional one you do not.
+
+### Why not Claude Code's built-in sandbox alone
+
+- It wraps Bash commands only. Anthropic's docs say MCP servers and command hooks ["run unconstrained on the host"](https://code.claude.com/docs/en/sandbox-environments), and recommend a container, a VM or `sandbox-runtime` for unattended work.
+- It builds a fresh `/dev` with no NVIDIA device nodes, and so does `sandbox-runtime`. [Issue #13108](https://github.com/anthropics/claude-code/issues/13108), open since December 2025, asks for device passthrough and has no workaround other than disabling the sandbox.
+- By default it falls back to unsandboxed when dependencies are missing, and lets failed commands retry outside the sandbox. Stage 3 turns both off for the times you run `claude` on the host.
+
+### Why not a plain Docker container
+
+- The Docker daemon runs as root, and the `docker` group is root-equivalent.
+- A container shares the host kernel and is started by a privileged runtime. In November 2025 runc fixed [CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm) and two related bugs that let a hostile Dockerfile or container gain host root. The maintainers say rootless containers "entirely mitigate" that escalation, because an unprivileged runtime cannot write the procfs files the attack targets. That is the main reason this setup is rootless. [Appendix A](#appendix-a-how-the-sandbox-is-built-and-its-limits) has the details.
+
+### Why not gVisor
+
+[gVisor's nvproxy](https://gvisor.dev/docs/user_guide/gpu/) narrows the NVIDIA driver surface to an allow-list of ioctls and protects against general kernel bugs. It says it is "much less effective" against NVIDIA driver bugs, GeForce cards are unofficial, rootless mode with nvproxy is [broken upstream](https://github.com/google/gvisor/issues/11076), and [`perf_event_open` is unimplemented](https://gvisor.dev/docs/user_guide/compatibility/linux/amd64/). The launcher has an experimental CPU-only `--gvisor` flag for people who install gVisor themselves.
+
+### Why not Docker Sandboxes
+
+It is the closest ready-made alternative and the stronger sandbox: each one is a microVM with its own kernel, and secrets never enter it. Three things ruled it out for GPU and profiling work: the agent template is hard to inspect and can change underneath you, GPU passthrough is experimental and needs a GPU the host is not using, and hardware perf counters are not available inside the VM. [Appendix E](#appendix-e-docker-sandboxes-in-detail) has the full comparison, including what it does better.
+
+## Appendix A: how the sandbox is built, and its limits
+
+This appendix explains the design choices behind `01-setup-podman.sh` and `agent-run.sh`. For how the result compares with other tools, see [Alternatives](#alternatives).
+
+### Why rootless, and why patch levels matter
+
+- **Rootless.** In November 2025 runc fixed [CVE-2025-52881](https://github.com/opencontainers/runc/security/advisories/GHSA-cgrx-mc8f-2prm) and two related bugs that let a hostile Dockerfile or container gain host root, fixed per release branch in runc 1.2.8, 1.3.3 and 1.4.0-rc.3. The maintainers say rootless containers "entirely mitigate" the privilege escalation, because an unprivileged runtime cannot write the procfs files the attack targets.
+- **Switching runtime is not the fix.** Podman here uses crun, and the same advisory says crun and youki "may have similar security issues". Keep crun updated through apt. What protects you is that the runtime runs without privileges.
+- **The NVIDIA toolkit.** [CVE-2025-23266 "NVIDIAScape"](https://www.wiz.io/blog/nvidia-ai-vulnerability-cve-2025-23266-nvidiascape) (CVSS 9.0): a three-line Dockerfile got host root through the NVIDIA Container Toolkit's hook. Fixed in toolkit 1.17.8. It triggers when a container is created from an attacker's image, so never let the agent build or start containers on the host.
 
 ### What each launcher flag buys
 
@@ -561,15 +577,6 @@ Rootless Podman is the strongest option that still gives CUDA on a single-GPU ma
 
 - CUDA talks to the host NVIDIA kernel driver through `/dev/nvidia*`. With `--gpu`, code in the container can send raw ioctls to that driver. [Quarkslab](https://blog.quarkslab.com/nvidia_gpu_kernel_vmalloc_exploit.html) turned two such bugs into a root shell from an unprivileged process; both are fixed in driver 580.95.05 and in the matching October 2025 releases of the older branches. Keep the driver current and pass `--gpu` only when needed.
 - The only way to remove the host driver from the attack surface is to hand the whole GPU to a VM over VFIO. Docker Sandboxes, Kata and libvirt all work that way, and all need [a GPU the host is not using](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/). NVIDIA's GPU-sharing modes are licensed datacenter features.
-- [gVisor's nvproxy](https://gvisor.dev/docs/user_guide/gpu/) narrows the driver surface to an allow-list of ioctls and protects against general kernel bugs. It says it is "much less effective" against NVIDIA driver bugs, GeForce cards are unofficial, rootless mode with nvproxy is [broken upstream](https://github.com/google/gvisor/issues/11076), and [`perf_event_open` is unimplemented](https://gvisor.dev/docs/user_guide/compatibility/linux/amd64/).
-
-| Need | Use |
-| --- | --- |
-| CUDA and perf counters, repo you trust | `agent-run.sh --gpu --perf` |
-| A repo you trust less, no GPU needed | `agent-run.sh --untrusted`. Optionally add `--gvisor` if you have set gVisor up |
-| CUDA under gVisor | Not available in this rootless setup. It needs a rootful `runsc` with nvproxy, which gives up the rootless protection |
-| Code you consider hostile, no GPU | A VM, a Docker Sandbox in `--clone` mode, or a Claude Code cloud session |
-| Untrusted code that needs a GPU | A separate machine or cloud GPU instance that holds no credentials |
 
 ### Perf counters
 
@@ -586,10 +593,6 @@ Current Podman documentation says that DNS on an `--internal` network [answers o
 - The networks are created with `--disable-dns`, and the agent container runs with `--dns none`, so lookups fail at once.
 - The launcher reads the proxy's IP address on the internal network and passes it in `HTTPS_PROXY`. Programs hand the host name to the proxy, and the proxy resolves it.
 - Squid does its own lookups with the servers in `~/.config/agent-sandbox/squid-dns.conf`. `agent-run.sh` writes that file each time it starts the proxy, from the host's upstream resolvers (`/run/systemd/resolve/resolv.conf`, then `/etc/resolv.conf`, skipping loopback addresses), and falls back to `1.1.1.1` and `9.9.9.9`.
-
-### Known rough edges
-
-See [Troubleshooting](#troubleshooting). The two to expect first: tools that ignore `HTTPS_PROXY` cannot reach the network at all, which is the safe failure, and SELinux hosts need a relabelled project mount.
 
 ## Appendix B: GitHub permissions in detail
 
@@ -689,7 +692,7 @@ All the Claude Code issues are fixed, and none of those versions is a safe floor
 | Flag | Use |
 | --- | --- |
 | `--settings '{"disableAllHooks": true}'` | Hooks off for one run on a host without managed settings |
-| `--setting-sources user` | Do not read the project's settings files or `.mcp.json`. Used by `--untrusted` |
+| `--setting-sources user` | Do not load the project's settings files, `.mcp.json` or `CLAUDE.md`. Used by `--untrusted` |
 | `--bare` | Headless runs: no project hooks, skills, commands, subagents, plugins or MCP servers |
 | `disabledMcpjsonServers` (setting) | Reject a named `.mcp.json` server in every session type |
 
@@ -702,7 +705,7 @@ Everything is in [`scripts/`](../scripts/). Put that directory on your `PATH`.
 | [`01-setup-podman.sh`](../scripts/01-setup-podman.sh) | Stage 1: host checks, Podman install, CDI, seccomp profile, images, networks |
 | [`02-github-single-repo.sh`](../scripts/02-github-single-repo.sh) | Stage 2: single-repo fine-grained token, verification, Podman secret |
 | [`03-claude-settings.sh`](../scripts/03-claude-settings.sh) | Stage 3, host side: merge hardening into `~/.claude/settings.json`; `--managed` installs host managed settings |
-| [`agent-run.sh`](../scripts/agent-run.sh) | Daily launcher: `--gpu`, `--perf`, `--gvisor`, `--untrusted`, `--shell` |
+| [`agent-run.sh`](../scripts/agent-run.sh) | Daily launcher: `--gpu`, `--perf`, `--ask`, `--untrusted`, `--shell`, `--check-token`, experimental `--gvisor` |
 | [`inspect-repo.sh`](../scripts/inspect-repo.sh) | Clone without executing anything and flag what the repo would auto-run |
 | [`container/check-github-token.sh`](../scripts/container/check-github-token.sh) | The token check. Run it with `agent-run.sh --check-token`; the launcher mounts it into the sandbox |
 | [`test-hook-blocking.sh`](../scripts/test-hook-blocking.sh) | Prove, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
@@ -718,17 +721,17 @@ The Anthropic hosts in the allowlists come from Claude Code's [network access re
 
 The pattern scan in `inspect-repo.sh` is a net for careless attacks. It will not catch an obfuscated payload, so it does not replace reading the flagged files.
 
-## Appendix E: why not Docker Sandboxes
+## Appendix E: Docker Sandboxes in detail
 
-[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (`sbx`) is the closest ready-made alternative, and on isolation strength it is the better tool: each sandbox is a microVM with its own kernel. This guide uses rootless Podman instead for three reasons that mattered for GPU and profiling work. If you need neither, read the last part of this appendix first. Everything here is as of September 2026; `sbx` is changing quickly.
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (`sbx`) is the closest ready-made alternative, and on isolation strength it is the better tool: each sandbox is a microVM with its own kernel. [Alternatives](#alternatives) says when to choose it. This appendix gives the detail. Everything here is as of September 2026; `sbx` is changing quickly.
 
-### The three reasons
+### Why this guide does not use it
 
 **1. The configuration is hard to inspect and can change underneath you.** The agent environment comes from a template image that Docker publishes ([`docker/sandbox-templates`](https://hub.docker.com/layers/docker/sandbox-templates/claude-code/images/)). You can look at its layers on Docker Hub, but that is not the same as reading a build file, and a template you pull by tag can be replaced without any change on your side. In this setup everything that defines the sandbox is a short text file in this repository, built on your machine: the [Containerfile](../scripts/container/Containerfile.agent), the [proxy rules](../scripts/container/squid.conf), the [allowlists](../scripts/container/allowed-domains.txt), the [managed settings](../scripts/container/managed-settings.json) and the [launcher](../scripts/agent-run.sh) with every `podman run` flag on its own commented line. Docker does offer "kits" for customising a sandbox, and marks that format experimental.
 
 **2. GPU access.** Docker's [GPU passthrough](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/) is experimental and works by handing the whole GPU to the VM over VFIO. It needs an x86_64 Linux host, IOMMU, the `iommufd` and `vfio_pci` modules, a driver bundle that must be rebuilt after every `sbx` upgrade, and in Docker's words "a GPU that nothing else is using". On the authoring laptop the install script was buggy and creating a GPU sandbox crashed the machine. Here, `agent-run.sh --gpu` shares the host's GPU through CDI: a CUDA kernel compiled and ran inside the container while the desktop kept running.
 
-**3. Hardware performance counters.** Inside a Docker Sandbox, `perf stat` reported `cycles`, `instructions` and `cache-misses` as `<not supported>`: the hypervisor does not pass the CPU's performance counters to the guest, so instructions-per-cycle and cache-miss analysis are not possible. Here, `agent-run.sh --perf` returned real values for all three on the same laptop. The cost is that the `perf_event_open` syscall is allowed in that session, and the host needs `kernel.perf_event_paranoid` at 2 or lower.
+**3. Hardware performance counters.** Inside a Docker Sandbox, `perf stat` reported `cycles`, `instructions` and `cache-misses` as `<not supported>`: the hypervisor does not pass the CPU's performance counters to the guest, so instructions-per-cycle and cache-miss analysis are not possible. Here, `agent-run.sh --perf` returned real values for all three on the same laptop, at the cost described under [Perf counters](#perf-counters).
 
 ### What Docker Sandboxes does better
 
@@ -752,18 +755,6 @@ Two things are roughly equal. Both put the whole agent, including a repository's
 - **Agent skills are shared across sandboxes,** which Docker describes as "a narrow exception to cross-sandbox isolation".
 - **It needs a Docker account** to sign in, and the central policy features are part of a paid plan. The `sbx` CLI itself is free.
 - **Parts of it are still moving.** The GPU flag, its driver bundle and the kit format are all marked experimental or subject to change.
-
-### Which to use
-
-| Your situation | Use |
-| --- | --- |
-| You need CUDA on a machine whose GPU is in use, or hardware perf counters | This setup |
-| You want to read and version every line that defines the sandbox | This setup |
-| No GPU and no profiling, and you want the strongest boundary with the least to maintain | Docker Sandboxes, or another VM-based option |
-| Code you consider hostile | Docker Sandboxes in `--clone` mode, a VM, or a Claude Code cloud session. Not this setup |
-| macOS or Windows | Docker Sandboxes |
-
-The two can coexist: this setup for daily GPU work on repositories you trust, and a VM-based sandbox for the occasional repository you do not.
 
 ## Test status
 

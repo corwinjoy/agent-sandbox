@@ -22,7 +22,7 @@
 # whether the default branch needs pull requests or reviews is a setting of the repository.
 set -euo pipefail
 
-usage() { sed -n '2,22p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,/^set -euo/{/^set -euo/!p}' "$0"; exit "${1:-0}"; }
 [ $# -ge 1 ] || usage 2
 case "$1" in -h|--help) usage ;; esac
 REPO_SLUG="$1"; shift

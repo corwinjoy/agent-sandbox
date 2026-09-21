@@ -7,7 +7,7 @@
 # disabled. Nothing from the repository is executed. It then prints every file that an
 # agent, an editor or a package manager would act on automatically.
 set -euo pipefail
-[ $# -eq 1 ] || { sed -n '2,8p' "$0"; exit 2; }
+[ $# -eq 1 ] || { sed -n '2,/^set -euo/{/^set -euo/!p}' "$0"; exit 2; }
 
 if [ -d "$1" ]; then
   DIR="$(cd "$1" && pwd)"

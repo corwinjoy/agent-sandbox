@@ -61,8 +61,8 @@ session() {
   # shellcheck disable=SC2086  # $flags is a list of launcher flags
   AGENT_RUN_EXTRA_ARGS="$extra" "$HERE/agent-run.sh" $flags -- -p "$PROMPT" "$@" </dev/null >"$WORK/out.txt" 2>&1 \
     || { echo "  the Claude session failed:"; sed 's/^/    /' "$WORK/out.txt" | tail -5; exit 1; }
-  # `|| true`: finding no marker is a valid result, not an error.
-  RAN="$({ ls "$PROJ" | grep '^MARKER_' || true; } | sed 's/^MARKER_//' | tr '\n' ' ')"
+  # No marker at all is a valid result, not an error.
+  RAN="$(cd "$PROJ" && for f in MARKER_*; do [ -e "$f" ] && printf '%s ' "${f#MARKER_}"; done; true)"
   if grep -q 'PINEAPPLE-7731' "$WORK/out.txt"; then MEMO="loaded"; else MEMO="not loaded"; fi
   echo "   ran: ${RAN:-nothing}   | CLAUDE.md: $MEMO"
 }

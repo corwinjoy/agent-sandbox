@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
     --untrusted) UNTRUSTED=1 ;; --shell) SHELL_MODE=1 ;; --ask) ASK=1 ;;
     --check-token) CHECK_TOKEN=1 ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/{/^set -euo/!p}' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -94,6 +94,7 @@ PROXY_URL="http://$PROXY_IP:3128"
 # A terminal only when there is one, so that headless use works from scripts and pipelines:
 #   agent-run.sh -- -p "summarise this repo" > out.txt
 if [ -t 0 ] && [ -t 1 ]; then TTY=(-it); else TTY=(-i); fi
+# shellcheck disable=SC2054  # the commas below are inside option values, not array separators
 ARGS=(
   --rm "${TTY[@]}"
   --name "agent-$(printf '%s' "$(basename "$PWD")" | tr -c 'a-zA-Z0-9_.-' '-')-$$"

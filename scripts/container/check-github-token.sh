@@ -47,6 +47,7 @@ else fail "the token can see $(printf '%s\n' "$PRIVATE_OTHERS" | wc -l) other pr
 
 # Write probes: the repositories you named, plus up to three others the token can list.
 LISTED="$(gh api 'user/repos?per_page=100' --jq '.[].full_name' 2>/dev/null | grep -vxF "$TARGET" | head -n 3 || true)"
+# shellcheck disable=SC2086  # $LISTED is a whitespace-separated list, split on purpose
 CANARIES="$(printf '%s\n' "$@" $LISTED | grep -E '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' | awk '!seen[$0]++' || true)"
 if [ -z "$CANARIES" ]; then warn "no other repository to probe. Name one: agent-run.sh --check-token -- OWNER/OTHER"; fi
 for r in $CANARIES; do
