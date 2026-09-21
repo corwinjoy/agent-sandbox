@@ -52,14 +52,14 @@ HARDEN="$(cat <<'JSON'
 JSON
 )"
 
-# Deep merge: objects recurse, arrays are unioned, scalars take the hardened value.
+# Deep merge: objects recurse, arrays gain the entries they lack, scalars take the hardened value.
 jq -n --argjson cur "$(cat "$SETTINGS")" --argjson add "$HARDEN" '
   def merge(a; b):
     if (a|type) == "object" and (b|type) == "object" then
       reduce ((a|keys) + (b|keys) | unique)[] as $k ({};
         .[$k] = (if (a|has($k)) and (b|has($k)) then merge(a[$k]; b[$k])
                  elif (b|has($k)) then b[$k] else a[$k] end))
-    elif (a|type) == "array" and (b|type) == "array" then (a + b | unique)
+    elif (a|type) == "array" and (b|type) == "array" then (a + (b - a))   # keep your order, append what is new
     else b end;
   merge($cur; $add)' > "$SETTINGS.new"
 mv "$SETTINGS.new" "$SETTINGS"

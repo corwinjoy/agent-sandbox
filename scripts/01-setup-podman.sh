@@ -17,14 +17,7 @@
 # /etc/subgid entries if they are missing.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
-# Base image for the agent. Set BASE_IMAGE once (for example to a CUDA image); the choice is
-# remembered in $CFG_DIR/base-image so that a plain re-run rebuilds on the same base.
-mkdir -p "$CFG_DIR"
-BASE_IMAGE="${BASE_IMAGE:-$(cat "$CFG_DIR/base-image" 2>/dev/null || echo docker.io/library/ubuntu:24.04)}"
-echo "$BASE_IMAGE" > "$CFG_DIR/base-image"
-
+# ---- helpers (kept above any side effect so that tests can source this file) ----------------
 say()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '  [WARN] %s\n' "$*" >&2; }
 ok()   { printf '  [ok] %s\n' "$*"; }
@@ -40,6 +33,20 @@ runc_fixed() {
     *)     ver_ge "$1" 1.4.0 ;;          # 1.4.0 final and later; anything below 1.2 fails
   esac
 }
+# First id after every range already in the file (never below 100000), so a new range
+# cannot overlap another user's. Lines are name:start:count.
+next_free_id() { awk -F: '{e=$2+$3; if (e>m) m=e} END{print (m>100000 ? m : 100000)}' "$1" 2>/dev/null || echo 100000; }
+
+# Sourced by tests/unit.sh to test the helpers above. Stop here in that case.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
+# Base image for the agent. Set BASE_IMAGE once (for example to a CUDA image); the choice is
+# remembered in $CFG_DIR/base-image so that a plain re-run rebuilds on the same base.
+mkdir -p "$CFG_DIR"
+BASE_IMAGE="${BASE_IMAGE:-$(cat "$CFG_DIR/base-image" 2>/dev/null || echo docker.io/library/ubuntu:24.04)}"
+echo "$BASE_IMAGE" > "$CFG_DIR/base-image"
 
 # ---------------------------------------------------------------- 1. host checks
 say "Checking the host"
@@ -77,9 +84,6 @@ ok "podman $PODMAN_V"
 
 # ---------------------------------------------------------------- 3. subuid / subgid
 say "Checking subordinate id ranges"
-# First id after every range already in the file (never below 100000), so a new range
-# cannot overlap another user's. Lines are name:start:count.
-next_free_id() { awk -F: '{e=$2+$3; if (e>m) m=e} END{print (m>100000 ? m : 100000)}' "$1" 2>/dev/null || echo 100000; }
 MIGRATE=0
 # Each file is handled on its own: a system with only one of the two entries keeps it.
 for pair in /etc/subuid:--add-subuids /etc/subgid:--add-subgids; do

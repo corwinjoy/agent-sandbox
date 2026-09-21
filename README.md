@@ -58,6 +58,17 @@ inspect-repo.sh https://github.com/someone/project.git   # clone without executi
 cd untrusted/project && agent-run.sh --untrusted           # no token, no GPU, model-API-only network
 ```
 
+## Tests
+
+[![CI](https://github.com/corwinjoy/agent-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/corwinjoy/agent-sandbox/actions/workflows/ci.yml)
+
+```bash
+tests/run-tests.sh                 # static checks and unit tests: seconds, no Podman needed
+tests/run-tests.sh --integration   # also real-Podman tests: about a minute, after Stage 1
+```
+
+CI runs the static and unit tests, then a real `01-setup-podman.sh` and the integration tests, on every push and weekly. What needs a Claude login, a GitHub token or a GPU is tested by hand; see the guide's [Testing the scripts](docs/setup-guide.md#testing-the-scripts).
+
 ## What is here
 
 | Path | Contents |
@@ -70,6 +81,8 @@ cd untrusted/project && agent-run.sh --untrusted           # no token, no GPU, m
 | [`scripts/inspect-repo.sh`](scripts/inspect-repo.sh) | Reviews a repository's agent config, editor tasks and install scripts before anything opens it |
 | [`scripts/test-hook-blocking.sh`](scripts/test-hook-blocking.sh) | Checks, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
 | [`scripts/container/`](scripts/container/) | Containerfiles, Squid config, domain allowlists, git config, Claude Code managed settings, and the token check that `--check-token` runs |
+| [`tests/`](tests/) | The test suite: static checks, unit tests with stubbed `podman`/`gh`/`curl`, integration tests, and the docs consistency checker |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | GitHub Actions workflow |
 
 ## What this does not protect against
 

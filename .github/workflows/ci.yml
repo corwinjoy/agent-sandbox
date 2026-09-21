@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, because things outside this repository change: the Claude Code installer,
+    # Ubuntu's Podman packages, the container base image.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-and-unit:
+    name: Static checks and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static checks and unit tests
+        run: tests/run-tests.sh
+
+  integration:
+    name: Integration (real rootless Podman)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show the environment
+        run: |
+          podman --version || true
+          id
+          cat /proc/sys/kernel/perf_event_paranoid
+      - name: Stage 1 for real (01-setup-podman.sh)
+        # The runner has passwordless sudo and no GPU, so the script installs Podman's helpers,
+        # builds both images and creates the networks, and skips the CDI steps.
+        run: scripts/01-setup-podman.sh
+      - name: Integration tests
+        run: tests/integration.sh
+      - name: Proxy log, if something failed
+        if: failure()
+        run: |
+          podman ps -a || true
+          podman logs agent-proxy 2>&1 | tail -n 50 || true
+          podman exec agent-proxy tail -n 50 /var/log/squid/access.log 2>&1 || true

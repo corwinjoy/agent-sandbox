@@ -103,7 +103,6 @@ ARGS=(
   --userns=keep-id:uid=1000,gid=1000     # you on the host == 'agent' in the container
   --cap-drop=ALL                         # no Linux capabilities at all
   --security-opt=no-new-privileges       # setuid binaries cannot raise privileges
-  --pids-limit=2048 --memory=16g         # a runaway process cannot take the host down
   -v "$PWD":/workspace:rw                # the only host path in the container (add ,Z on SELinux hosts)
   -v "$HOME_VOL":/home/agent/.claude     # Claude login and state, kept between runs
   --tmpfs /tmp:rw,exec,size=4g
@@ -127,6 +126,12 @@ fi
 
 # shellcheck disable=SC2206  # word splitting is intended here
 [ -n "${AGENT_RUN_EXTRA_ARGS:-}" ] && ARGS+=( $AGENT_RUN_EXTRA_ARGS )
+# Resource limits: a runaway process cannot take the host down. Rootless Podman can only set
+# them when the cgroup controllers are delegated to your user, which is the case in a normal
+# desktop or SSH login but not in every environment (some CI runners, some `su` sessions).
+CONTROLLERS=" $(podman info --format '{{join .Host.CgroupControllers " "}}' 2>/dev/null) "
+case "$CONTROLLERS" in *" pids "*)   ARGS+=( --pids-limit=2048 ) ;; *) echo "agent-run: note: no pids cgroup controller, so no process limit" >&2 ;; esac
+case "$CONTROLLERS" in *" memory "*) ARGS+=( --memory=16g ) ;;      *) echo "agent-run: note: no memory cgroup controller, so no memory limit" >&2 ;; esac
 [ "$GPU" = 1 ]    && ARGS+=( --device nvidia.com/gpu=all )
 [ "$GVISOR" = 1 ] && ARGS+=( --runtime=runsc )
 if [ "$PERF" = 1 ]; then

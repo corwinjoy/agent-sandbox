@@ -501,6 +501,23 @@ ls ~/.claude/settings.json.bak.*     # restore the backup you want over ~/.claud
 
 Also delete the tokens at <https://github.com/settings/personal-access-tokens>.
 
+## Testing the scripts
+
+The repository has a test suite, and GitHub Actions runs it on every push, on pull requests and once a week. Run it yourself before you change a script:
+
+```bash
+tests/run-tests.sh                 # static checks and unit tests: a few seconds, no Podman needed
+tests/run-tests.sh --integration   # also the integration tests: about a minute, needs a finished Stage 1
+```
+
+| Suite | Needs | What it checks |
+| --- | --- | --- |
+| Static, [`tests/static.sh`](../tests/static.sh) | bash, jq, python3, shellcheck (or Podman to run it) | Syntax and shellcheck for every script. The managed settings still block hooks and MCP servers. The untrusted allowlist has no GitHub or registry. [`tests/check-docs.py`](../tests/check-docs.py): every anchor and file link in this guide and the README resolves, the JSON and the token URL shown here match the files, every script is in Appendix D, and every launcher flag is documented |
+| Unit, [`tests/unit.sh`](../tests/unit.sh) | Nothing else. `podman`, `gh` and `curl` are stubs | The `podman run` command line the launcher builds in each mode, and every refusal. Untrusted mode never gets the token, even when one is stored. The `.git/config` review flags a planted `hooksPath` and stays quiet about a harmless change. The runc version table, the subuid range picker, the settings merge (keeps your settings, idempotent), the repository inspector against a hostile and a clean fixture, and the token check against well-scoped, over-scoped and classic tokens |
+| Integration, [`tests/integration.sh`](../tests/integration.sh) | Rootless Podman and the images from Stage 1 | In a real container: runs as `agent`, files written inside are yours on the host, empty capability bounding set, `no-new-privileges`, host home not visible, allowlisted domain connects, other domains get 403, no direct route, no DNS, `.git/hooks` read-only, a planted `core.hooksPath` is reported. Untrusted mode cannot reach GitHub and has no token. In CI this runs after a real `01-setup-podman.sh` |
+
+What the suite cannot cover, because it needs a Claude login, a GitHub token, a GPU or hardware counters: [`test-hook-blocking.sh`](#test-that-the-sandbox-blocks-a-repositorys-hooks-and-mcp-servers), `agent-run.sh --check-token` against a real token, `--gpu` and `--perf`. Run those by hand after changes that touch them; [Test status](#test-status) records the last results.
+
 ## Alternatives
 
 This setup is one point in a range. It was chosen because it is the strongest option that still gives CUDA on a GPU the desktop is using, plus hardware perf counters. If you need neither, a VM-based option is the better sandbox.
@@ -773,8 +790,9 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | Untrusted mode with a logged-in session | Confirmed: sign-in works through the Anthropic-only allowlist, and sessions start in manual permission mode |
 | `02-github-single-repo.sh` | Used twice to create real single-repository tokens, which work in the sandbox. Option handling tested |
 | `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
-| `03-claude-settings.sh` | Merge tested against a sample settings file. Not applied to a real `~/.claude/settings.json` |
+| `03-claude-settings.sh` | Merge covered by the unit tests, including that it keeps existing settings and that a second run changes nothing. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
+| Automated test suite (`tests/`) | 201 checks pass locally: 40 static, 125 unit, 36 integration. Each suite was shown to fail when the thing it guards was deliberately broken. The GitHub Actions workflow has **not yet run** |
 
 ## Sources
 
