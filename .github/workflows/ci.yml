@@ -4,10 +4,6 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-  schedule:
-    # Weekly, because things outside this repository change: the Claude Code installer,
-    # Ubuntu's Podman packages, the container base image.
-    - cron: "17 6 * * 1"
 
 permissions:
   contents: read

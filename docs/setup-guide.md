@@ -503,7 +503,7 @@ Also delete the tokens at <https://github.com/settings/personal-access-tokens>.
 
 ## Testing the scripts
 
-The repository has a test suite, and GitHub Actions runs it on every push, on pull requests and once a week. Run it yourself before you change a script:
+The repository has a test suite, and GitHub Actions runs it on every push and pull request. It can also be started by hand from the repository's Actions tab, which is worth doing now and then: the Claude Code installer, Ubuntu's Podman packages and the container base image all change outside this repository. Run the suite yourself before you change a script:
 
 ```bash
 tests/run-tests.sh                 # static checks and unit tests: a few seconds, no Podman needed
@@ -792,7 +792,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
 | `03-claude-settings.sh` | Merge covered by the unit tests, including that it keeps existing settings and that a second run changes nothing. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
-| Automated test suite (`tests/`) | 201 checks pass locally: 40 static, 125 unit, 36 integration. Each suite was shown to fail when the thing it guards was deliberately broken. The GitHub Actions workflow has **not yet run** |
+| Automated test suite (`tests/`) | 201 checks pass locally and in GitHub Actions: 40 static, 125 unit, 36 integration. Each suite was shown to fail when the thing it guards was deliberately broken. In CI the integration job ran a real `01-setup-podman.sh` on an `ubuntu-24.04` runner (Podman 4.9.3, no GPU) and passed on its first run, in about 90 seconds |
 
 ## Sources
 

@@ -67,7 +67,7 @@ tests/run-tests.sh                 # static checks and unit tests: seconds, no P
 tests/run-tests.sh --integration   # also real-Podman tests: about a minute, after Stage 1
 ```
 
-CI runs the static and unit tests, then a real `01-setup-podman.sh` and the integration tests, on every push and weekly. What needs a Claude login, a GitHub token or a GPU is tested by hand; see the guide's [Testing the scripts](docs/setup-guide.md#testing-the-scripts).
+CI runs the static and unit tests, then a real `01-setup-podman.sh` and the integration tests, on every push and pull request. It can also be started by hand from the Actions tab. What needs a Claude login, a GitHub token or a GPU is tested by hand; see the guide's [Testing the scripts](docs/setup-guide.md#testing-the-scripts).
 
 ## What is here
 
