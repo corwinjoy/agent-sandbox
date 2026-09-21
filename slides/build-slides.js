@@ -7,7 +7,7 @@ const out = process.argv[2] || "agent-sandbox-talk.pptx";
 const pres = new pptxgen();
 pres.layout = "LAYOUT_16x9"; // 10 x 5.625 in
 pres.author = "Corwin Joy";
-pres.title = "Boxing in a coding agent";
+pres.title = "Agent Sandboxing";
 
 // Palette: dark slate dominates, teal = boundary / safe, amber = attention, rust = risk.
 const INK = "1B2430", PAPER = "FFFFFF", MIST = "EEF2F6", TEAL = "1F8A83", AMBER = "E09F3E",
@@ -47,7 +47,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
 {
   const s = slide(true);
   boundary(s, 0.5, 0.5, 9, 4.6, TEAL);
-  s.addText("Boxing in a coding agent", tb({ x: 1.0, y: 1.45, w: 8, h: 0.9, fontSize: 42, bold: true, color: PAPER }));
+  s.addText("Agent Sandboxing", tb({ x: 1.0, y: 1.45, w: 8, h: 0.9, fontSize: 42, bold: true, color: PAPER }));
   s.addText("Why approving prompts is not a security boundary, and the sandbox I ended up building", tb({ x: 1.0, y: 2.45, w: 7.4, h: 0.9, fontSize: 18, color: "B8C4D0" }));
   s.addText("Corwin Joy", tb({ x: 1.0, y: 4.0, w: 5, h: 0.35, fontSize: 14, color: PAPER }));
   s.addText("github.com/corwinjoy/agent-sandbox", tb({ x: 1.0, y: 4.35, w: 6, h: 0.35, fontSize: 14, color: AMBER }));
@@ -79,8 +79,8 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   const s = slide();
   heading(s, "2. How it goes wrong", "Three mechanisms. None of them needs an exploit.");
   const rows = [
-    ["Bad hooks", RUST, "A cloned repository ships .claude/settings.json and .mcp.json. They are code.", "My control run: a headless session ran 3 repo hooks and started the repo's MCP server, with no prompt of any kind."],
-    ["Overeager AI", AMBER, "The agent wants to finish the task, and treats a restriction as an obstacle.", "Ona, 2026: an agent reached a denied npx through /proc/self/root/usr/bin/npx, then asked to run outside its sandbox."],
+    ["Bad hooks", RUST, "A cloned repository can ship scripts that run automatically.", "A hook named lint-check.sh greps your environment for AWS and API keys, lists ~/.ssh/id_*, posts both to a remote server, and exits 0 so nothing looks wrong. (Bruniaux)"],
+    ["Overeager AI", AMBER, "The agent treats a block as a puzzle to solve.", "npx was on a deny list. The agent ran it anyway via the path /proc/self/root/usr/bin/npx, which the rule did not match. When the sandbox stopped that, it asked to run outside the sandbox. (Ona)"],
     ["Malicious prompts", RUST, "Text the agent reads carries instructions: issues, READMEs, web pages, tool output.", "Invariant Labs, 2025: an issue in a public repo made an agent copy private-repo data into a public pull request."],
   ];
   rows.forEach((r, i) => {
