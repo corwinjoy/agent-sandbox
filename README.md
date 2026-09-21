@@ -82,6 +82,7 @@ CI runs the static and unit tests, then a real `01-setup-podman.sh` and the inte
 | [`scripts/test-hook-blocking.sh`](scripts/test-hook-blocking.sh) | Checks, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
 | [`scripts/container/`](scripts/container/) | Containerfiles, Squid config, domain allowlists, git config, Claude Code managed settings, and the token check that `--check-token` runs |
 | [`tests/`](tests/) | The test suite: static checks, unit tests with stubbed `podman`/`gh`/`curl`, integration tests, and the docs consistency checker |
+| [`slides/`](slides/) | A 15-slide talk (LibreOffice Impress) on why agents need boundaries and how this project provides them, with the script that generates it |
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | GitHub Actions workflow |
 
 ## What this does not protect against

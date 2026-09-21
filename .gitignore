@@ -5,3 +5,7 @@ untrusted/
 .DS_Store
 .idea/
 .vscode/
+slides/node_modules/
+slides/*.pptx
+slides/*.pdf
+slides/package*.json
