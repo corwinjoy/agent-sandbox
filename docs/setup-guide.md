@@ -27,7 +27,7 @@ flowchart LR
 How to read the diagram:
 
 - **The agent container has no route to the internet.** Its network is created with `--internal` and with DNS switched off, so the agent cannot even look up an outside host. It reaches the proxy by IP address.
-- **The proxy container is the only way out.** It allows HTTPS to the domains in an allowlist file and refuses everything else. The agent cannot change it, because it runs in a different container.
+- **The proxy container is the only way out.** It allows HTTPS to the domains in an allowlist file and refuses everything else. In untrusted mode it also opens GitHub traffic and lets only reads through. The agent cannot change it, because it runs in a different container.
 - **The project directory is the only host path mounted.** Your home directory, SSH keys and cloud credentials are not in the container.
 - **The GitHub token is attached only when you start the agent inside a checkout of the repository the token was made for.**
 
@@ -39,7 +39,7 @@ How to read the diagram:
 | Stage 2. GitHub | `02-github-single-repo.sh OWNER/REPO` | A token for that repository only: read, commit, push, comment. Stored as a Podman secret |
 | Stage 3. Claude Code settings | Nothing for the container. `03-claude-settings.sh` for the host | In the container: repo hooks and MCP servers blocked, merge denied, force-push gated. On the host: secrets unreadable to the agent |
 | Daily use | `agent-run.sh [--gpu] [--perf]` | Claude Code on the current directory, inside the sandbox, in auto permission mode |
-| New untrusted repo | `inspect-repo.sh URL`, then `agent-run.sh --untrusted` | A review of what the repo would auto-run, then a session with no token, no GPU and model-API-only network |
+| New untrusted repo | `inspect-repo.sh URL`, then `agent-run.sh --untrusted` | A review of what the repo would auto-run, then a session with no token, no GPU, and a network of the model API plus read-only GitHub |
 
 ### Quick path
 
@@ -58,7 +58,8 @@ cd ~/src/myrepo && agent-run.sh                                # first run asks 
 
 - **It is a shared-kernel sandbox.** A Linux kernel or NVIDIA driver bug can still reach the host. [Alternatives](#alternatives) says when to use a VM-based sandbox instead.
 - **The project directory is writable.** The agent can change any file in it, including build scripts that run with your privileges if you later run them on the host. Two git-specific routes are handled: `.git/hooks` is mounted read-only, and the launcher shows you what changed in `.git/config` after each session. See [Git hooks and git config](#git-hooks-and-git-config).
-- **`github.com` is on the allowlist,** so data can be sent there. The single-repo token limits where it can be written.
+- **`github.com` is on the trusted-mode allowlist,** so data can be sent there. The single-repo token limits where it can be written. In untrusted mode the proxy refuses GitHub writes itself.
+- **The GitHub token is an environment variable inside the container.** Anything running there can read it. Its single-repository scope and expiry are the limit. [Appendix F](#appendix-f-nvidia-openshell-in-detail) describes a design where the credential never enters the sandbox.
 
 ### Terms used in this guide
 
@@ -124,7 +125,8 @@ The script is safe to re-run. It uses `sudo` for `apt`, for writing `/etc/cdi`, 
 | `~/.config/agent-sandbox/seccomp-perf.json` | Podman's default seccomp profile with `perf_event_open` moved from its deny rule to an allow rule. Used only with `--perf` |
 | `~/.config/agent-sandbox/allowed-domains*.txt` | The egress allowlists. Your copies; the script never overwrites them |
 | `localhost/agent-claude` image | Ubuntu, Claude Code, git, gh, Python, build tools, perf, the non-root user `agent`, managed settings, git config |
-| `localhost/agent-proxy` image | Squid. Allows HTTPS CONNECT to allowlisted domains only |
+| `localhost/agent-proxy` image | Squid, running as its own unprivileged user with no capabilities. Allows HTTPS tunnels to allowlisted domains; for GitHub in untrusted mode it terminates TLS with a CA of its own and allows only reads |
+| `agent-proxy*-ca` and `agent-proxy*-ca-pub` volumes | Created on first use: the proxy's inspection CA key (mounted by the proxy only) and its public certificate (mounted read-only by untrusted sessions) |
 | `agent-internal`, `agent-untrusted` networks | Created with `--internal --disable-dns`: no route to the outside and no name resolution |
 
 **The script:** [`scripts/01-setup-podman.sh`](../scripts/01-setup-podman.sh), commented step by step. The container build files it uses are in [`scripts/container/`](../scripts/container/).
@@ -362,6 +364,7 @@ agent-run.sh -- -p "summarise this repo" > summary.txt   # headless; works from 
 | `--untrusted` | See [the next section](#opening-a-new-untrusted-repository) | No push, no GPU, no registries, always manual permission mode |
 | `--shell` | bash instead of claude | |
 | `--check-token` | Runs the [Stage 2 token check](#stage-2-github-for-a-single-repository) for this checkout and exits | |
+| `--audit-egress` | A separate proxy that allows every HTTPS domain and logs it. Trusted mode only | Weaker by design. Use it for one task to learn which domains it needs, then read `egress-report.sh --audit` and go back. See [Growing the allowlist](#growing-the-allowlist) |
 | `--gvisor` | `--runtime=runsc`. Experimental and untested | CPU only. It refuses `--gpu` and `--perf`, and you must install gVisor and register it with Podman yourself. See [Why not gVisor](#why-not-gvisor) |
 
 `AGENT_RUN_EXTRA_ARGS` adds options to the `podman run` command, for example one more read-only mount: `AGENT_RUN_EXTRA_ARGS="-v $HOME/datasets:/data:ro" agent-run.sh`. Anything you add can weaken the sandbox, so keep mounts read-only and narrow.
@@ -410,11 +413,20 @@ The launcher starts Claude Code in **auto mode** for trusted sessions: a safety 
 | Task | Command |
 | --- | --- |
 | Change the allowlist | Edit `~/.config/agent-sandbox/allowed-domains.txt`, then `podman rm -f agent-proxy`. The next `agent-run.sh` starts a fresh proxy |
-| See what was allowed or denied | `podman exec agent-proxy tail -f /var/log/squid/access.log` |
+| See what was allowed or refused, per domain | `egress-report.sh`, `egress-report.sh --untrusted`, `egress-report.sh --audit`; add `--raw` for the log lines |
 | Update Claude Code or the image | Re-run `01-setup-podman.sh` |
 | Reset Claude's state and login | `podman volume rm agent-claude-home` |
 
-A `TCP_DENIED/403` line in the proxy log is the quickest way to find the domain a tool needs. Add the narrowest name that works.
+### Growing the allowlist
+
+Treat the allowlist like a firewall rule set: start narrow, and widen it from evidence rather than guesses. This is the workflow OpenShell documents as `audit` then `enforce`.
+
+1. Run the task in enforcing mode. If a tool fails to reach a site, `egress-report.sh` shows the refused domain in its right-hand column.
+2. When you cannot tell what a task needs, run it once with `agent-run.sh --audit-egress`. That starts a separate proxy, `agent-proxy-audit`, which allows every HTTPS domain and logs it. Plain HTTP stays refused, the agent stays on the internal network, and untrusted mode refuses the flag.
+3. `egress-report.sh --audit` lists every domain the task used. Add the narrowest names that work to `~/.config/agent-sandbox/allowed-domains.txt`, then `podman rm -f agent-proxy` so the next session starts a fresh enforcing proxy.
+4. Remove the audit proxy when you are done: `podman rm -f agent-proxy-audit`.
+
+Every domain you add is a place data can be sent. Prefer an exact host to a wildcard, and a registry mirror you control to a public one.
 
 ## Opening a new untrusted repository
 
@@ -452,13 +464,14 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
    | --- | --- |
    | No GitHub token attached | Nothing to push with, nothing to steal |
    | `--gpu` refused | Keeps the NVIDIA driver out of reach of unknown code |
-   | Separate network and proxy, using `allowed-domains-untrusted.txt`: Anthropic endpoints only | No GitHub, no registries, so nowhere to send data |
+   | Separate network and proxy, using `allowed-domains-untrusted.txt`: the Anthropic endpoints, plus GitHub through TLS inspection | No registries, and no way to write to GitHub, so nowhere to send data |
+   | Read-only GitHub, enforced by the proxy | The proxy terminates TLS for `github.com` and `api.github.com` with its own CA and allows clone, fetch and `GET`. Push, `POST`, `PUT` and `DELETE` get a 403 from the proxy, whatever credentials are presented. Tools trust the CA through `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `PIP_CERT` and `NODE_EXTRA_CA_CERTS`; a tool that ignores all of those sees a certificate error on GitHub and nothing else |
    | Separate `agent-claude-home-untrusted` volume | Nothing the repository writes into Claude's state can affect later trusted sessions |
    | `claude --setting-sources user` | The repository's `.claude/settings*.json`, `.mcp.json` and `CLAUDE.md` are not loaded at all |
    | Manual permission mode | Claude asks before each action. See [Permission mode](#permission-mode) |
    | Managed settings, as always | Hooks and MCP servers from any source stay blocked |
 
-4. **Install dependencies with scripts off.** Add the one registry you need to `~/.config/agent-sandbox/allowed-domains-untrusted.txt` and restart the proxy with `podman rm -f agent-proxy-untrusted`. Install with `npm ci --ignore-scripts`, or `pip install --only-binary=:all:` so that no `setup.py` runs. Then remove the registry again.
+4. **Install dependencies with scripts off.** Add the one registry you need to `~/.config/agent-sandbox/allowed-domains-untrusted.txt` and restart the proxy with `podman rm -f agent-proxy-untrusted`. (`gh` needs a token even for public reads, so use `git` and `curl` in untrusted mode.) Install with `npm ci --ignore-scripts`, or `pip install --only-binary=:all:` so that no `setup.py` runs. Then remove the registry again.
 
 5. **Do not run the repository's code on the host.** Tests, builds and `make` targets run inside the container. Anything in the project directory, including Makefiles and `package.json` scripts the agent may have changed, runs with your full privileges if you run it outside.
 
@@ -472,7 +485,9 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| A tool cannot reach a site, or `CONNECT tunnel failed, response 403` | The domain is not on the allowlist | Find the `TCP_DENIED` line in the proxy log, add the domain, `podman rm -f agent-proxy` |
+| A tool cannot reach a site, or `Connection reset by peer` right after connecting | The domain is not on the allowlist, so the proxy reset the tunnel | `egress-report.sh` shows it in the refused column. Add the domain, then `podman rm -f agent-proxy`. Unsure what a task needs? See [Growing the allowlist](#growing-the-allowlist) |
+| `The requested URL returned error: 403` from git or curl on GitHub in untrusted mode | The proxy refused a write: push, `POST`, `PUT` or `DELETE`. Reads work | Deliberate. Promote the repository to trusted mode when you have reviewed it |
+| `SSL certificate problem` or `self-signed certificate` on GitHub in untrusted mode | A tool that ignores every CA environment variable met the proxy's inspection certificate | Point the tool at `/etc/agent-sandbox/ca/ca-bundle.pem` with its own option, or use `git` or `curl` instead. Other domains are not inspected and are unaffected |
 | Every outside domain fails, even allowlisted ones | The proxy cannot resolve names. It uses the DNS servers in `~/.config/agent-sandbox/squid-dns.conf`, which the launcher writes from the host's resolvers | Put resolvers that work from your network on the `dns_nameservers` line, then `podman rm -f agent-proxy` |
 | `could not find the proxy's address`, or every request times out | The proxy container is not running | `podman ps -a` and `podman logs agent-proxy`. Remove it with `podman rm -f agent-proxy` and start `agent-run.sh` again |
 | `getent hosts` or `ping` cannot resolve anything inside the container | Expected. DNS is off on purpose; programs reach the network through the proxy, which does the lookups | Make sure the tool honours `HTTPS_PROXY` |
@@ -491,7 +506,9 @@ Never open an unreviewed repository with an agent or an editor on the host. Clon
 podman rm -f agent-proxy agent-proxy-untrusted
 podman rmi localhost/agent-claude localhost/agent-proxy
 podman network rm agent-internal agent-untrusted
+podman rm -f agent-proxy-audit
 podman volume rm agent-claude-home agent-claude-home-untrusted
+podman volume rm $(podman volume ls -q | grep '^agent-proxy.*-ca')   # the proxy inspection CAs
 podman secret ls                     # then: podman secret rm gh-OWNER-REPO for each
 rm -rf ~/.config/agent-sandbox
 sudo rm -f /etc/claude-code/managed-settings.json   # only if you ran 03-claude-settings.sh --managed
@@ -530,6 +547,7 @@ This setup is one point in a range. It was chosen because it is the strongest op
 | **This setup: rootless Podman, proxy, single-repo token** | Shared kernel, unprivileged runtime | Yes | Yes | Yes, with `--perf` | Kernel and NVIDIA driver bugs can still reach the host |
 | gVisor (`runsc`) | User-space kernel in front of the host kernel | Yes | Only rootful, and unofficial on GeForce | No | No GPU in a rootless setup |
 | Docker Sandboxes (`sbx`) | Own kernel (microVM) | Agent yes. Local MCP servers run on the host | No: needs a GPU nothing else is using | No | Opaque template. GPU support is experimental |
+| NVIDIA OpenShell | Shared kernel on its Docker and Podman drivers (own kernel on its microVM and Kubernetes paths) | Yes, and each allowed endpoint names which binaries may reach it | Yes, through CDI, same as this setup | No: its seccomp filter denies `perf_event_open` | Alpha. Needs Podman 5 or the Docker socket. No host mount. API-key login only |
 | Your own VM with GPU passthrough (libvirt, Kata) | Own kernel | Yes | No: the GPU leaves the host while the VM runs | Not verified | Most setup effort. Fragile on laptops |
 | Separate GPU machine or cloud GPU instance | Different hardware | Yes | Yes | Yes on bare metal | Cost, and whatever credentials you copy there |
 | Claude Code cloud session | Anthropic-managed VM | Yes | No GPU | Not checked | Not for GPU work |
@@ -544,6 +562,7 @@ This setup is one point in a range. It was chosen because it is the strongest op
 | No GPU and no profiling, and you want the strongest boundary with the least to maintain | Docker Sandboxes, or another VM-based option |
 | Code you consider hostile | Docker Sandboxes in `--clone` mode, your own VM, or a Claude Code cloud session. Not this setup |
 | Untrusted code that needs a GPU | A separate machine or cloud GPU instance that holds no credentials |
+| A team sharing a GPU cluster, or anyone who wants per-binary and per-request network rules | NVIDIA OpenShell, once it fits your Podman version and login |
 | macOS or Windows | Docker Sandboxes |
 
 The options can coexist: this setup for daily GPU work on repositories you trust, and a VM-based sandbox for the occasional one you do not.
@@ -562,6 +581,10 @@ The options can coexist: this setup for daily GPU work on repositories you trust
 ### Why not gVisor
 
 [gVisor's nvproxy](https://gvisor.dev/docs/user_guide/gpu/) narrows the NVIDIA driver surface to an allow-list of ioctls and protects against general kernel bugs. It says it is "much less effective" against NVIDIA driver bugs, GeForce cards are unofficial, rootless mode with nvproxy is [broken upstream](https://github.com/google/gvisor/issues/11076), and [`perf_event_open` is unimplemented](https://gvisor.dev/docs/user_guide/compatibility/linux/amd64/). The launcher has an experimental CPU-only `--gvisor` flag for people who install gVisor themselves.
+
+### Why not NVIDIA OpenShell
+
+[OpenShell](https://github.com/NVIDIA/OpenShell) is the most complete design of the group at the network and credential layers, and two of its ideas are now in this setup: refusing GitHub writes at the proxy by HTTP method and path, and an audit mode for growing an allowlist. It is an alpha, its Podman driver needs Podman 5 (Ubuntu 24.04 ships 4.9), its Docker driver needs the Docker socket, its seccomp filter denies `perf_event_open`, it documents API-key login only, and it has nothing Claude-Code-specific, so a repository's hooks and MCP servers run inside its workload. [Appendix F](#appendix-f-nvidia-openshell-in-detail) has the comparison.
 
 ### Why not Docker Sandboxes
 
@@ -583,6 +606,8 @@ This appendix explains the design choices behind `01-setup-podman.sh` and `agent
 | --- | --- |
 | Rootless, `--userns=keep-id` | Root in the container is not root on the host. Project files keep your ownership |
 | `--network agent-internal` plus the proxy, `--dns none` | Exfiltration to arbitrary hosts, reverse shells and DNS tunnelling. The agent cannot remove the rule, because it is enforced in another container |
+| Proxy: TLS-name check | A tunnel whose TLS name is not on the list is cut, so an allowed tunnel cannot be reused to speak to a different host |
+| Proxy: GitHub inspection in untrusted mode | Sending data to GitHub from unreviewed code. Only clone, fetch and `GET` pass |
 | `--cap-drop=ALL`, `no-new-privileges` | Raw sockets, mounts, ptrace of other users' processes, setuid escalation |
 | Only `$PWD` mounted | Reading `~/.ssh`, cloud credentials, browser profiles, other projects |
 | `--pids-limit`, `--memory` | Fork bombs and memory exhaustion |
@@ -594,6 +619,16 @@ This appendix explains the design choices behind `01-setup-podman.sh` and `agent
 
 - CUDA talks to the host NVIDIA kernel driver through `/dev/nvidia*`. With `--gpu`, code in the container can send raw ioctls to that driver. [Quarkslab](https://blog.quarkslab.com/nvidia_gpu_kernel_vmalloc_exploit.html) turned two such bugs into a root shell from an unprivileged process; both are fixed in driver 580.95.05 and in the matching October 2025 releases of the older branches. Keep the driver current and pass `--gpu` only when needed.
 - The only way to remove the host driver from the attack surface is to hand the whole GPU to a VM over VFIO. Docker Sandboxes, Kata and libvirt all work that way, and all need [a GPU the host is not using](https://docs.docker.com/ai/sandboxes/configuration/gpu-passthrough/). NVIDIA's GPU-sharing modes are licensed datacenter features.
+
+### How the proxy inspects GitHub in untrusted mode
+
+Squid is built with TLS support (`squid-openssl`). On first start the proxy generates a CA of its own, keeps the key in a volume only it mounts, and publishes the certificate plus a bundle (the public roots first, then its own certificate) to a volume that untrusted sessions mount read-only. For the two inspected names the proxy terminates TLS, issues a certificate for the name on the fly, and applies method and path rules: `GET`, `HEAD`, `OPTIONS` and the `git-upload-pack` `POST` that clone and fetch need are allowed; anything mentioning `git-receive-pack`, and every other write method, is refused with a 403. Every other domain is relayed unread, exactly as in trusted mode, so the proxy never sees Claude's API traffic. Trusted mode inspects nothing and mounts no CA. A refused tunnel is reset rather than answered, because on a TLS-capable port Squid would otherwise serve its error page over a certificate of its own.
+
+This is the design OpenShell and Docker Sandboxes use for credential injection and request rules, applied to one domain pair. Its cost is that tools inside the sandbox have to trust the proxy's CA for those names; the launcher sets the usual variables, and a tool that ignores all of them gets a certificate error on GitHub only.
+
+### What the proxy cannot do
+
+It cannot tell which process opened a connection. OpenShell's supervisor can, because it sits inside the sandbox and brokers every `connect()`; that lets a policy say "only `git` may reach github.com". Squid sees a TCP connection from the container and no more. That is the largest gap between this setup and OpenShell, and closing it means a component inside the container, not a proxy setting. See [Appendix F](#appendix-f-nvidia-openshell-in-detail).
 
 ### Perf counters
 
@@ -727,10 +762,14 @@ Everything is in [`scripts/`](../scripts/). Put that directory on your `PATH`.
 | [`container/check-github-token.sh`](../scripts/container/check-github-token.sh) | The token check. Run it with `agent-run.sh --check-token`; the launcher mounts it into the sandbox |
 | [`test-hook-blocking.sh`](../scripts/test-hook-blocking.sh) | Prove, with a control run, that the sandbox blocks a repository's hooks and MCP servers |
 | [`container/Containerfile.agent`](../scripts/container/Containerfile.agent) | Agent image: Claude Code, git, gh, Python, build tools, non-root user |
-| [`container/Containerfile.proxy`](../scripts/container/Containerfile.proxy) | Egress proxy image (Squid) |
-| [`container/squid.conf`](../scripts/container/squid.conf) | Proxy rules: HTTPS CONNECT to allowlisted domains only |
+| [`container/Containerfile.proxy`](../scripts/container/Containerfile.proxy) | Egress proxy image: Squid with TLS support, running as the unprivileged `proxy` user |
+| [`container/proxy-entrypoint.sh`](../scripts/container/proxy-entrypoint.sh) | Prepares the proxy: picks enforce or audit mode and the inspected domains, creates or reuses the inspection CA, publishes its certificate |
+| [`container/mode-enforce.conf`](../scripts/container/mode-enforce.conf), [`container/mode-audit.conf`](../scripts/container/mode-audit.conf) | The Squid rules that differ between enforce and audit mode |
+| [`container/inspect-github.txt`](../scripts/container/inspect-github.txt) | The domains the proxy inspects in untrusted mode |
+| [`egress-report.sh`](../scripts/egress-report.sh) | Per-domain table of what a proxy allowed and refused, from its log |
+| [`container/squid.conf`](../scripts/container/squid.conf) | Proxy rules: HTTPS tunnels to allowlisted domains, TLS-name check, read-only rules for inspected domains |
 | [`container/allowed-domains.txt`](../scripts/container/allowed-domains.txt) | Allowlist, trusted mode |
-| [`container/allowed-domains-untrusted.txt`](../scripts/container/allowed-domains-untrusted.txt) | Allowlist, untrusted mode: Anthropic endpoints only |
+| [`container/allowed-domains-untrusted.txt`](../scripts/container/allowed-domains-untrusted.txt) | Allowlist, untrusted mode: Anthropic endpoints; GitHub is handled by inspection |
 | [`container/gitconfig`](../scripts/container/gitconfig) | System git config in the agent image: token credential helper, SSH-to-HTTPS rewrite, hooks off |
 | [`container/managed-settings.json`](../scripts/container/managed-settings.json) | Claude Code managed settings baked into the agent image |
 
@@ -773,6 +812,53 @@ Two things are roughly equal. Both put the whole agent, including a repository's
 - **It needs a Docker account** to sign in, and the central policy features are part of a paid plan. The `sbx` CLI itself is free.
 - **Parts of it are still moving.** The GPU flag, its driver bundle and the kit format are all marked experimental or subject to change.
 
+## Appendix F: NVIDIA OpenShell in detail
+
+[OpenShell](https://github.com/NVIDIA/OpenShell) is an Apache-2.0 runtime for sandboxed agents, in alpha as of September 2026 (pre-0.1.0 breaking changes, about 240 open issues). This appendix is from its documentation and source at commit `99ed6a9` of 2026-09-22, not from running it. [Alternatives](#alternatives) says when to choose it.
+
+### What it is
+
+A resident control-plane service (the gateway: gRPC API, SQLite or Postgres, mTLS, a systemd user service) creates sandboxes through a driver: Docker, Podman, Kubernetes or a libkrun microVM. Each sandbox is a pair of containers. The agent runs in a workload container that has no network interface at all. A separate supervisor container holds the proxy, an OPA policy engine and the credentials. Both run as a non-root user with every capability dropped.
+
+Inside the workload, a Landlock policy makes every path the policy does not list inaccessible, a seccomp filter denies ptrace, bpf, mount, unshare, setns, io_uring, setuid and more, and a seccomp user-notification broker intercepts every `connect()` and hands it to the supervisor. Egress is therefore decided per connection at the syscall, not by a proxy environment variable.
+
+### Where it is stronger than this setup
+
+| Area | OpenShell | This setup |
+| --- | --- | --- |
+| Binary identity | Every allowed endpoint names the executables that may reach it, checked through `/proc/<pid>/exe` and a SHA-256 taken on first use. A hook running `curl` against the model API is refused because `curl` is not on that endpoint's list | Any process in the container may use any allowed domain |
+| Request-level rules | Per-endpoint HTTP method and path rules, plus GraphQL, WebSocket, MCP and JSON-RPC parsers. Its default GitHub policy allows `git-upload-pack` and refuses `git-receive-pack` | Method and path rules for GitHub in untrusted mode only, borrowed from OpenShell. Elsewhere, hostname only |
+| Credentials | Bound to a provider's endpoints and injected by the proxy: the GitHub token goes "to the endpoints below and nowhere else" | `GH_TOKEN` is an environment variable that anything in the container can read |
+| Filesystem inside the container | Landlock: paths the policy does not list are inaccessible, even inside the container | Whatever the image contains is readable |
+| Host workspace | Not mounted. The sandbox owns `/sandbox`; you clone or upload into it. Bind mounts are off by default and documented as insecure | Your checkout is mounted read-write, with the two git routes patched |
+| Egress interception | At the `connect()` syscall, in a workload with no network interface | An internal network with no DNS, and a proxy reached by IP. Similar in effect, built from Podman settings |
+| Operations | A TUI with the deny log and operator approval of new endpoints, hot-reloadable network policy, an audit mode, a policy prover, SDKs, a Kubernetes path | Text files, `podman rm -f agent-proxy`, `egress-report.sh` |
+| Platforms and upkeep | Linux, macOS, WSL2. NVIDIA maintains it | Linux. You maintain it |
+
+### Where this setup fits better, today
+
+| Area | Detail |
+| --- | --- |
+| Hardware perf counters | OpenShell's child seccomp filter denies `perf_event_open` unconditionally (`child_seccomp.rs`), with no policy field to allow it. Here, `--perf` is confirmed working |
+| Podman version | Its Podman driver requires Podman 5.x. Ubuntu 24.04 ships 4.9.3. That leaves its Docker driver, which needs the gateway to hold the Docker socket, the root-equivalent access this guide removes |
+| GPU | The same CDI mechanism as this setup on its container drivers, so no gain. Its microVM driver uses QEMU with VFIO for GPUs, which needs a GPU nothing else is using, the same limit as Docker Sandboxes. An open issue reports `cuInit` failing in an OpenShell sandbox where plain CDI works |
+| Claude login | Its quickstart requires an API key from console.anthropic.com, "not a subscription token", and `claude.ai` is not in its default policy. A subscription login works here |
+| Repository hooks and MCP servers | Nothing Claude-Code-specific: no managed settings in its base image, so a cloned repository's hooks and `.mcp.json` servers run inside the workload. Landlock and binary identity contain them; this setup stops them from starting, with a test to prove it |
+| Workspace friction | No host mount means clone, `--upload`, `sandbox exec` or an SSH editor session to move code in and out |
+| Size and maturity | About 700 lines of shell with 200 tests, against a large Rust system with a resident service, telemetry on by default, and L7 rules that default to `audit` (log, do not block) unless set to `enforce` |
+| Kernel boundary | Neither changes it on the container drivers: both share the host kernel, and the NVIDIA driver with `--gpu` |
+
+### What was borrowed
+
+- **Read-only GitHub at the proxy.** In untrusted mode the proxy now terminates TLS for `github.com` and `api.github.com` with its own CA and allows only reads: clone and fetch work, and push, `POST`, `PUT` and `DELETE` are refused at the proxy. Before, untrusted mode simply had no GitHub.
+- **Audit, then enforce.** `agent-run.sh --audit-egress` starts a separate proxy that allows every HTTPS domain and logs it, and `egress-report.sh` turns the log into a per-domain table. Run one task, add the narrowest names that work, go back to enforcing.
+
+### What was not borrowed, and why
+
+- **Binary identity.** Squid cannot see which process opened a connection. It needs a component inside the container that intercepts `connect()`, which is most of OpenShell's supervisor. It is the single biggest thing this setup lacks.
+- **Endpoint-bound credentials.** The same component would let the proxy add the GitHub token to requests for `api.github.com` only, so the token never sits in the container. Worth doing if this project grows.
+- **No host mount.** Deliberate: the point of this setup is `cd ~/src/myrepo && agent-run.sh`. Docker Sandboxes' clone mode and OpenShell's owned workspace are the safer design.
+
 ## Test status
 
 Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aardvark-dns 1.4.0, crun), NVIDIA driver 580, NVIDIA Container Toolkit 1.20.1, Claude Code 2.1.278 in the image.
@@ -780,7 +866,8 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | Piece | Status |
 | --- | --- |
 | `01-setup-podman.sh` | Run from scratch with a CUDA base image after the fixes, and it worked. The first run had exposed three bugs, all fixed: the CDI spec was unreadable by Podman 4.9, internal-network DNS forwarded outside names, and the perf seccomp profile had no effect |
-| `agent-run.sh`, trusted and untrusted modes, container properties | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets 403, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
+| Proxy: read-only GitHub in untrusted mode, TLS-name check, audit mode | Confirmed under Podman through the launcher: in untrusted mode GitHub shows the proxy's CA, `git clone`, `fetch` and `ls-remote` of a public repository work, `git push` fails with a 403 from the proxy before any credentials are checked, API `GET` works and `POST`, `PUT` and `DELETE` get 403, a registry gets a reset. In trusted mode GitHub shows its real issuer and no CA is mounted. A tunnel whose TLS name is not listed is cut. Audit mode allows and logs an unlisted domain and still refuses plain HTTP. The CA survives proxy recreation. The proxy runs as its own user with `--cap-drop=ALL` |
+| `agent-run.sh`, trusted and untrusted modes, container properties | Run with `--shell`. Confirmed: runs as `agent` with project files owned by you on the host, read-write project mount, zero effective capabilities, `no-new-privileges` set, no host home directory visible, allowlisted domains connect, `example.com` gets its tunnel reset, direct connections by IP fail, outside DNS lookups fail at once, `git ls-remote` works through the proxy in trusted mode and fails in untrusted mode |
 | Read-only `.git/hooks` and the `.git/config` review | Confirmed: writing a hook and moving the hooks directory both fail inside the sandbox, commits and branch changes still work, a planted `core.hooksPath` and a `!` alias are flagged after the session, a benign change is shown without a warning, no change prints nothing, and the session's exit code is preserved |
 | `--perf` | Confirmed: counters blocked without the flag, real `cycles`, `instructions` and `cache-misses` with it |
 | `--gpu` | Confirmed with the compatible CDI spec: `nvidia-smi` sees the GPU, and a CUDA kernel compiled with `nvcc` 12.6 inside the container ran on it with no errors. Capabilities stay at zero and direct egress stays closed. `--gpu --perf` together also confirmed |
@@ -792,7 +879,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
 | `03-claude-settings.sh` | Merge covered by the unit tests, including that it keeps existing settings and that a second run changes nothing. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
-| Automated test suite (`tests/`) | 201 checks pass locally and in GitHub Actions: 40 static, 125 unit, 36 integration. Each suite was shown to fail when the thing it guards was deliberately broken. In CI the integration job ran a real `01-setup-podman.sh` on an `ubuntu-24.04` runner (Podman 4.9.3, no GPU) and passed on its first run, in about 90 seconds |
+| Automated test suite (`tests/`) | 251 checks pass locally: 52 static, 144 unit, 55 integration. Each suite was shown to fail when the thing it guards was deliberately broken. The integration suite now clones a public repository through the inspecting proxy and confirms a push is refused. In CI the integration job runs a real `01-setup-podman.sh` on an `ubuntu-24.04` runner (Podman 4.9.3, no GPU); the last CI run predates the proxy changes |
 
 ## Sources
 
@@ -826,7 +913,9 @@ Pages opened on 2026-09-18. Security vendors cited here sell related products; t
 - [Ona: how Claude Code escapes its own denylist and sandbox](https://ona.com/stories/how-claude-code-escapes-its-own-denylist-and-sandbox)
 - [NVIDIA AI red team: sandboxing agentic workflows](https://developer.nvidia.com/blog/practical-security-guidance-for-sandboxing-agentic-workflows-and-managing-execution-risk/)
 
-**Containers and GPUs**
+**Containers, GPUs and other runtimes**
+
+- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell), its [documentation](https://docs.nvidia.com/openshell/latest/) and [community sandbox images](https://github.com/NVIDIA/OpenShell-Community)
 
 - [Podman network create: internal networks and DNS](https://docs.podman.io/en/latest/markdown/podman-network-create.1.html)
 - [NVIDIA Container Toolkit CDI support](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/cdi-support.html)

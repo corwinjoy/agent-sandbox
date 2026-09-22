@@ -1,6 +1,10 @@
-# Domains for untrusted-repo mode: the model API and nothing else.
-# No GitHub, no registries. Add a registry only for the duration of an install.
+# Domains for untrusted-repo mode: the model API, and read-only GitHub.
+# github.com and api.github.com are not listed here: the proxy inspects them (see squid.conf)
+# and allows clone, fetch and GET while refusing push and every other write. No token is in
+# the sandbox, so writes would fail anyway; the rule makes read-only a guarantee of the proxy.
+# No registries. Add one only for the duration of an install.
 api.anthropic.com
 claude.ai
 claude.com
 platform.claude.com
+raw.githubusercontent.com

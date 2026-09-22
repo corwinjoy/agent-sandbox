@@ -1,9 +1,17 @@
 # Egress proxy: the only container with a route to the internet.
-# Squid allows CONNECT to port 443 for the listed domains and refuses everything else.
+# Squid allows HTTPS CONNECT to allowlisted domains and refuses everything else. For a short
+# list of "inspected" domains (GitHub, in untrusted mode) it terminates TLS with its own CA so
+# that it can allow reads and refuse writes by HTTP method and path.
 FROM docker.io/library/ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends squid ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY squid.conf /etc/squid/squid.conf
-# The allowlist is mounted at run time so you can edit it without rebuilding.
+RUN apt-get update && apt-get install -y --no-install-recommends squid-openssl openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/squid /ca-pub /var/lib/agent-proxy /var/log/squid /var/spool/squid \
+    && chown -R proxy:proxy /run/squid /ca-pub /var/lib/agent-proxy /var/log/squid /var/spool/squid
+COPY squid.conf mode-enforce.conf mode-audit.conf inspect-github.txt /etc/squid/
+COPY proxy-entrypoint.sh /usr/local/bin/proxy-entrypoint
+RUN chmod 0755 /usr/local/bin/proxy-entrypoint
+# The allowlist and the DNS servers are mounted at run time so you can edit them without rebuilding.
+# Everything runs as the unprivileged proxy user: no capabilities are needed at all.
+USER proxy
 EXPOSE 3128
-CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]
+ENTRYPOINT ["/usr/local/bin/proxy-entrypoint"]

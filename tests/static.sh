@@ -22,7 +22,7 @@ else
 fi
 
 section "executable bits"
-for f in scripts/*.sh scripts/container/check-github-token.sh tests/run-tests.sh; do check "$f is executable" test -x "$f"; done
+for f in scripts/*.sh scripts/container/check-github-token.sh scripts/container/proxy-entrypoint.sh tests/run-tests.sh; do check "$f is executable" test -x "$f"; done
 
 section "JSON files"
 check "managed-settings.json parses" jq -e . scripts/container/managed-settings.json
@@ -31,9 +31,15 @@ check "managed settings allow no MCP servers"         jq -e '.allowManagedMcpSer
 check "managed settings deny 'gh pr merge'"           jq -e '.permissions.deny | index("Bash(gh pr merge *)")' scripts/container/managed-settings.json
 
 section "allowlists"
-check "untrusted allowlist has no github or registry" bash -c '! grep -vE "^\s*#" scripts/container/allowed-domains-untrusted.txt | grep -qiE "github|npmjs|pypi|pythonhosted"'
 check "allowlists contain only host names and comments" bash -c '! grep -vE "^\s*(#.*)?$" scripts/container/allowed-domains*.txt | grep -vE ":\.?[A-Za-z0-9.-]+$"'
 check "squid denies by default" grep -q '^http_access deny all' scripts/container/squid.conf
+check "squid refuses plain HTTP tunnels" grep -q '^http_access deny CONNECT !SSL_ports' scripts/container/squid.conf
+check "squid refuses git push on inspected domains" grep -q '^http_access deny inspect_domains git_push' scripts/container/squid.conf
+check "squid cuts tunnels whose TLS name is not listed" grep -q '^ssl_bump terminate !allowed_sni' scripts/container/squid.conf
+check "inspected domains are exactly github.com and api.github.com" bash -c '[ "$(grep -v "^#" scripts/container/inspect-github.txt | sort | tr "\n" " ")" = "api.github.com github.com " ]'
+check "the untrusted allowlist has no registry" bash -c '! grep -vE "^\s*#" scripts/container/allowed-domains-untrusted.txt | grep -qiE "npmjs|pypi|pythonhosted"'
+check "enforce mode adds no rules" bash -c '! grep -vE "^\s*(#.*)?$" scripts/container/mode-enforce.conf | grep -q .'
+check "proxy image runs as the proxy user" grep -q '^USER proxy' scripts/container/Containerfile.proxy
 
 section "docs"
 check "guide anchors, links and consistency with the scripts" python3 tests/check-docs.py

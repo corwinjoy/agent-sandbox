@@ -167,10 +167,11 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
     ["Plain Docker container", "Root daemon, shared kernel", RUST],
     ["Claude Code's sandbox", "Bash only, no GPU", RUST],
     ["Docker Sandboxes", "Strong, but no GPU or perf for me", AMBER],
+    ["NVIDIA OpenShell", "Best network design; alpha, no perf", AMBER],
     ["Rootless Podman + scoped token", "What this project is", TEAL],
   ];
   tried.forEach((t, i) => {
-    const y = 2.0 + i * 0.76;
+    const y = 1.95 + i * 0.64;
     badge(s, 5.9, y + 0.05, String(i + 1), t[2]);
     s.addText(t[0], tb({ x: 6.5, y, w: 3.0, h: 0.3, fontSize: 12.5, bold: true, color: INK }));
     s.addText(t[1], tb({ x: 6.5, y: y + 0.3, w: 3.0, h: 0.28, fontSize: 11, color: MUTED }));
@@ -254,10 +255,42 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   s.addNotes("I want to be fair to Docker here. On isolation it is the better tool, and the project's guide says so. My three reasons are specific to my work. If you do not need a GPU or perf counters, stop here and use it.");
 }
 
+// ---------- 9b. why not OpenShell ----------
+{
+  const s = slide();
+  heading(s, "9. Why not NVIDIA OpenShell?", "The best network design of the group. Two of its ideas are now in this project.");
+  s.addText("What it gets right", tb({ x: 0.5, y: 1.5, w: 4.4, h: 0.3, fontSize: 14, bold: true, color: TEAL }));
+  const yes = [
+    ["Binary identity", "Each allowed endpoint names which executables may reach it. A hook running curl is refused."],
+    ["Request-level rules", "Method and path rules per endpoint. GitHub reads allowed, pushes refused, at the proxy."],
+    ["Credentials never enter the sandbox", "Injected by the proxy, bound to their endpoints."],
+  ];
+  yes.forEach((r, i) => {
+    const y = 1.9 + i * 0.92;
+    card(s, 0.5, y, 4.4, 0.82, PALE);
+    s.addText(r[0], tb({ x: 0.7, y: y + 0.08, w: 4.0, h: 0.26, fontSize: 12.5, bold: true, color: INK }));
+    s.addText(r[1], tb({ x: 0.7, y: y + 0.34, w: 4.0, h: 0.45, fontSize: 10.5, color: INK }));
+  });
+  s.addText("Why not, for me, today", tb({ x: 5.1, y: 1.5, w: 4.4, h: 0.3, fontSize: 14, bold: true, color: RUST }));
+  const no = [
+    ["No hardware perf counters", "Its seccomp filter denies perf_event_open, with no policy switch."],
+    ["Podman 5 or the Docker socket", "Ubuntu 24.04 ships Podman 4.9; the Docker driver needs root-equivalent access."],
+    ["Alpha, API-key login, hooks still run", "Pre-0.1.0 changes; no subscription login documented; nothing Claude-Code-specific."],
+  ];
+  no.forEach((r, i) => {
+    const y = 1.9 + i * 0.92;
+    card(s, 5.1, y, 4.4, 0.82, "FBEDEA");
+    s.addText(r[0], tb({ x: 5.3, y: y + 0.08, w: 4.0, h: 0.26, fontSize: 12.5, bold: true, color: INK }));
+    s.addText(r[1], tb({ x: 5.3, y: y + 0.34, w: 4.0, h: 0.45, fontSize: 10.5, color: INK }));
+  });
+  s.addText("Borrowed: read-only GitHub enforced at the proxy in untrusted mode, and an audit-then-enforce workflow for the allowlist.", tb({ x: 0.5, y: 4.75, w: 9, h: 0.4, fontSize: 11.5, italic: true, color: MUTED }));
+  s.addNotes("OpenShell is NVIDIA's open-source agent runtime. Its supervisor sits inside the sandbox and brokers every connect() call, which is how it knows which binary is talking and can keep credentials out of the workload. I would want that design. But it denies perf_event_open outright, needs Podman 5 or the Docker socket, and is alpha. I took two ideas from it instead.");
+}
+
 // ---------- 10. rootless podman vs docker ----------
 {
   const s = slide();
-  heading(s, "9. Rootless Podman vs Docker", "Same images, same commands. The difference is who is holding the keys.");
+  heading(s, "10. Rootless Podman vs Docker", "Same images, same commands. The difference is who is holding the keys.");
   const H = (t) => ({ text: t, options: { bold: true, color: PAPER, fill: { color: INK }, fontFace: F, fontSize: 12 } });
   const C = (t, o) => ({ text: t, options: Object.assign({ color: INK, fontFace: F, fontSize: 11.5 }, o || {}) });
   const rows = [
@@ -277,7 +310,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
 // ---------- 11. project: architecture ----------
 {
   const s = slide();
-  heading(s, "10. The project: what it builds", "github.com/corwinjoy/agent-sandbox");
+  heading(s, "11. The project: what it builds", "github.com/corwinjoy/agent-sandbox");
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 0.5, y: 1.5, w: 6.7, h: 2.75, rectRadius: 0.1, fill: { color: "F7F9FB" }, line: { color: LINE, width: 1 } });
   s.addText("Your machine", tb({ x: 0.7, y: 1.57, w: 3, h: 0.25, fontSize: 10.5, bold: true, color: MUTED }));
   const box = (x, y, w, h, t, fill, col) => { card(s, x, y, w, h, fill); s.addText(t, tb({ x: x + 0.08, y, w: w - 0.16, h, fontSize: 10.5, color: col || INK, align: "center", valign: "middle" })); };
@@ -286,7 +319,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   boundary(s, 2.85, 1.9, 2.3, 2.2, TEAL);
   s.addText("Internal network: no route out, no DNS", tb({ x: 2.9, y: 1.97, w: 2.2, h: 0.4, fontSize: 9, bold: true, color: TEAL, align: "center" }));
   box(3.05, 2.45, 1.9, 1.5, [{ text: "Agent container", options: { bold: true, breakLine: true } }, { text: "Claude Code, hooks, MCP", options: { breakLine: true } }, { text: "no capabilities" }], INK, PAPER);
-  box(5.45, 2.7, 1.55, 1.0, [{ text: "Proxy", options: { bold: true, breakLine: true } }, { text: "domain allowlist" }], TEAL, PAPER);
+  box(5.45, 2.7, 1.55, 1.0, [{ text: "Proxy", options: { bold: true, breakLine: true } }, { text: "domain allowlist," , options: { breakLine: true } }, { text: "read-only GitHub" }], TEAL, PAPER);
   box(7.65, 2.45, 1.85, 1.5, [{ text: "api.anthropic.com", options: { breakLine: true } }, { text: "github.com", options: { breakLine: true } }, { text: "registries" }], MIST);
   arrow(s, 2.4, 2.78, 0.65, INK); arrow(s, 2.4, 3.63, 0.65, INK); arrow(s, 4.95, 3.23, 0.5, INK); arrow(s, 7.0, 3.2, 0.65, INK);
   s.addText("read-write", tb({ x: 2.35, y: 2.5, w: 0.8, h: 0.2, fontSize: 8.5, color: MUTED, align: "center" }));
@@ -308,7 +341,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
 // ---------- 12. project: stages and daily use ----------
 {
   const s = slide();
-  heading(s, "11. Three stages, then one command", "Every piece is a short, commented file you can read.");
+  heading(s, "12. Three stages, then one command", "Every piece is a short, commented file you can read.");
   const st = [
     ["1", "Podman", "01-setup-podman.sh", "Rootless Podman, GPU through CDI, agent and proxy images, two internal networks."],
     ["2", "GitHub", "02-github-single-repo.sh", "A fine-grained token for one repository: read, commit, push, comment. Stored as a Podman secret."],
@@ -341,11 +374,11 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
 // ---------- 13. project: untrusted repos + evidence ----------
 {
   const s = slide();
-  heading(s, "12. Untrusted repositories, and proof", "Claims in the guide are tested, with controls.");
+  heading(s, "13. Untrusted repositories, and proof", "Claims in the guide are tested, with controls.");
   s.addText("A repository you have not reviewed", tb({ x: 0.5, y: 1.5, w: 4.5, h: 0.3, fontSize: 14, bold: true, color: INK }));
   s.addText(bullets([
     "inspect-repo.sh clones without running anything and flags hooks, MCP commands, env overrides, folder-open tasks, install scripts, hidden Unicode.",
-    "agent-run.sh --untrusted: no token, no GPU, model API only, manual approvals, separate state.",
+    "agent-run.sh --untrusted: no token, no GPU, manual approvals, separate state. Network: the model API plus read-only GitHub, enforced by the proxy.",
     "The repository's settings, .mcp.json and CLAUDE.md are not loaded at all.",
     "Git's own back doors are closed: .git/hooks is read-only, and .git/config changes are shown after each session.",
     "For code you consider hostile, use a VM. This shares your kernel.",
@@ -353,7 +386,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   const stats = [
     ["3 + 1", "hooks and an MCP server ran in the control run, protections off, with no prompt", RUST],
     ["0", "ran in the sandbox as shipped. Each untrusted-mode layer blocks them on its own", TEAL],
-    ["201", "automated checks in CI, including a real setup run and live container tests", INK],
+    ["251", "automated checks, including a real setup run and live container tests in CI", INK],
   ];
   stats.forEach((t, i) => {
     const y = 1.5 + i * 1.2;
@@ -367,7 +400,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
 // ---------- 14. links ----------
 {
   const s = slide();
-  heading(s, "13. Further reading", "General guidance on sandboxing agents.");
+  heading(s, "14. Further reading", "General guidance on sandboxing agents.");
   const links = [
     ["Claude Code attack surface", "Florian Bruniaux. Model output, hook scripts, MCP servers.", "https://www.florian.bruniaux.com/guides/claude-code-attack-surface/"],
     ["Docker sandboxes aren't enough for agent safety", "Arcade. Solid principles, short on specifics.", "https://www.arcade.dev/blog/docker-sandboxes-arent-enough-for-agent-safety/"],
@@ -376,11 +409,12 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
     ["Practical security guidance for sandboxing agentic workflows", "NVIDIA AI red team. Mandatory and recommended controls.", "https://developer.nvidia.com/blog/practical-security-guidance-for-sandboxing-agentic-workflows-and-managing-execution-risk/"],
     ["The lethal trifecta", "Simon Willison. Private data, untrusted content, external communication.", "https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/"],
     ["GitHub MCP exploited", "Invariant Labs. The attack that motivates single-repository tokens.", "https://invariantlabs.ai/blog/mcp-github-vulnerability"],
+    ["NVIDIA OpenShell", "Open-source agent runtime: binary identity, endpoint-bound credentials, request rules.", "https://github.com/NVIDIA/OpenShell"],
   ];
   links.forEach((l, i) => {
-    const y = 1.5 + i * 0.52;
-    s.addText([{ text: l[0], options: { hyperlink: { url: l[2] }, color: TEAL, bold: true } }], tb({ x: 0.5, y, w: 9, h: 0.25, fontSize: 12.5 }));
-    s.addText(l[1], tb({ x: 0.5, y: y + 0.24, w: 9, h: 0.23, fontSize: 10.5, color: MUTED }));
+    const y = 1.45 + i * 0.47;
+    s.addText([{ text: l[0], options: { hyperlink: { url: l[2] }, color: TEAL, bold: true } }], tb({ x: 0.5, y, w: 9, h: 0.24, fontSize: 12 }));
+    s.addText(l[1], tb({ x: 0.5, y: y + 0.22, w: 9, h: 0.22, fontSize: 10, color: MUTED }));
   });
   s.addNotes("The first three are where I started. The guide in the repository has a fuller source list, with the advisories for every CVE mentioned in this talk.");
 }

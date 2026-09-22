@@ -1,10 +1,10 @@
 # Slides
 
-`agent-sandbox-talk.odp` is a 15-slide talk, in LibreOffice Impress format, about why a coding agent needs boundaries and how this project provides them. Speaker notes are on every slide.
+`agent-sandbox-talk.odp` is a 16-slide talk, in LibreOffice Impress format, about why a coding agent needs boundaries and how this project provides them. Speaker notes are on every slide.
 
 | | | |
 | --- | --- | --- |
-| ![Title](preview-01.jpg) | ![Approving prompts](preview-04.jpg) | ![What it builds](preview-11.jpg) |
+| ![Title](preview-01.jpg) | ![Approving prompts](preview-04.jpg) | ![What it builds](preview-12.jpg) |
 
 ## Outline
 
@@ -16,12 +16,13 @@
 6. Why not just Docker?
 7. Why not Claude Code's own sandbox?
 8. Why not Docker Sandboxes?
-9. Rootless Podman vs Docker
-10. The project: what it builds
-11. The project: three stages, then one command
-12. The project: untrusted repositories, and proof
-13. Further reading
-14. Project link
+9. Why not NVIDIA OpenShell?
+10. Rootless Podman vs Docker
+11. The project: what it builds
+12. The project: three stages, then one command
+13. The project: untrusted repositories, and proof
+14. Further reading
+15. Project link
 
 ## Rebuilding
 

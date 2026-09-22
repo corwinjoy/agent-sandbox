@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch Claude Code inside the rootless Podman sandbox, on the current directory.
 #
-#   agent-run.sh [--gpu] [--perf] [--ask] [--untrusted] [--shell] [--gvisor] [-- claude args...]
+#   agent-run.sh [--gpu] [--perf] [--ask] [--untrusted] [--audit-egress] [--shell] [--gvisor] [-- claude args...]
 #
 #   --gpu        expose the NVIDIA GPU through CDI (adds the NVIDIA driver to the attack surface)
 #   --perf       allow perf_event_open so `perf stat` sees hardware counters
@@ -11,9 +11,13 @@
 #                The default in the sandbox is auto mode: a safety classifier approves routine
 #                actions, and the container is the backstop. Managed deny and ask rules
 #                (no merge, prompt on force-push) apply in both modes.
-#   --untrusted  for repos you have not reviewed: no GitHub token, no GPU, model-API-only
-#                network, separate Claude state, project hooks/MCP/skills not loaded,
-#                and always manual permission mode
+#   --untrusted  for repos you have not reviewed: no GitHub token, no GPU, separate Claude
+#                state, project hooks/MCP/skills not loaded, manual permission mode, and a
+#                network of the model API plus READ-ONLY GitHub: the proxy inspects GitHub
+#                traffic and refuses pushes and every other write
+#   --audit-egress  trusted mode only: use a separate proxy that allows every HTTPS domain and
+#                logs it, to learn what a task needs before adding domains to the allowlist.
+#                Weaker by design. Run one task, then egress-report.sh --audit, then go back.
 #   --shell      start bash instead of claude (to look around or log in)
 #   --check-token  check the GitHub token attached for this checkout: what it can do on this
 #                repository, and that it can write nowhere else. The repository comes from
@@ -28,12 +32,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-sandbox"
-GPU=0 PERF=0 GVISOR=0 UNTRUSTED=0 SHELL_MODE=0 ASK=0 CHECK_TOKEN=0 TOKEN_ATTACHED=0 SLUG=""
+GPU=0 PERF=0 GVISOR=0 UNTRUSTED=0 SHELL_MODE=0 ASK=0 CHECK_TOKEN=0 AUDIT=0 TOKEN_ATTACHED=0 SLUG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) GPU=1 ;; --perf) PERF=1 ;; --gvisor) GVISOR=1 ;;
     --untrusted) UNTRUSTED=1 ;; --shell) SHELL_MODE=1 ;; --ask) ASK=1 ;;
-    --check-token) CHECK_TOKEN=1 ;;
+    --check-token) CHECK_TOKEN=1 ;; --audit-egress) AUDIT=1 ;;
     --) shift; break ;;
     -h|--help) sed -n '2,/^set -euo/{/^set -euo/!p}' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -42,14 +46,27 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- mode-dependent names -------------------------------------------------------------
+# PROXY_INSPECT=github makes the proxy terminate TLS for github.com and api.github.com with its
+# own CA and allow only reads there; PROXY_MODE=audit allows every HTTPS domain and logs it.
 if [ "$UNTRUSTED" = 1 ]; then
   NET=agent-untrusted  PROXY=agent-proxy-untrusted  ALLOW="$CFG_DIR/allowed-domains-untrusted.txt"
   HOME_VOL=agent-claude-home-untrusted      # never shares state with trusted sessions
+  PROXY_MODE=enforce PROXY_INSPECT=github
   [ "$GPU" = 1 ] && { echo "--gpu is refused with --untrusted (see Appendix A of the guide)"; exit 2; }
+  [ "$AUDIT" = 1 ] && { echo "--audit-egress is refused with --untrusted: unreviewed code gets no wider network"; exit 2; }
+elif [ "$AUDIT" = 1 ]; then
+  NET=agent-internal   PROXY=agent-proxy-audit      ALLOW="$CFG_DIR/allowed-domains.txt"
+  HOME_VOL=agent-claude-home
+  PROXY_MODE=audit PROXY_INSPECT=none
+  echo "agent-run: AUDIT MODE: every HTTPS domain is allowed and logged. Review with: egress-report.sh --audit" >&2
 else
   NET=agent-internal   PROXY=agent-proxy            ALLOW="$CFG_DIR/allowed-domains.txt"
   HOME_VOL=agent-claude-home
+  PROXY_MODE=enforce PROXY_INSPECT=none
 fi
+# The proxy's inspection CA: the private key in a volume only the proxy mounts, the public
+# certificate in one the agent can mount read-only. One pair per proxy container.
+CA_PRIV="$PROXY-ca" CA_PUB="$PROXY-ca-pub"
 
 if [ "$CHECK_TOKEN" = 1 ] && [ "$UNTRUSTED" = 1 ]; then
   echo "--check-token makes no sense with --untrusted: untrusted sessions never get a token"; exit 2
@@ -74,9 +91,11 @@ if ! podman container exists "$PROXY" || [ "$(podman inspect -f '{{.State.Runnin
   # Attached to the internal network (where the agent lives) and to the default
   # network (the way out). The allowlist is mounted read-only.
   podman run -d --name "$PROXY" --network "$NET" --network podman \
-    --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --security-opt=no-new-privileges \
+    --cap-drop=ALL --security-opt=no-new-privileges \
+    -e PROXY_MODE="$PROXY_MODE" -e PROXY_INSPECT="$PROXY_INSPECT" \
     -v "$ALLOW":/etc/squid/allowed-domains.txt:ro \
     -v "$CFG_DIR/squid-dns.conf":/etc/squid/dns.conf:ro \
+    -v "$CA_PRIV":/var/lib/agent-proxy -v "$CA_PUB":/ca-pub \
     localhost/agent-proxy >/dev/null
 fi
 # The agent reaches the proxy by IP address. DNS is switched off on the internal network so
@@ -132,6 +151,17 @@ fi
 CONTROLLERS=" $(podman info --format '{{join .Host.CgroupControllers " "}}' 2>/dev/null) "
 case "$CONTROLLERS" in *" pids "*)   ARGS+=( --pids-limit=2048 ) ;; *) echo "agent-run: note: no pids cgroup controller, so no process limit" >&2 ;; esac
 case "$CONTROLLERS" in *" memory "*) ARGS+=( --memory=16g ) ;;      *) echo "agent-run: note: no memory cgroup controller, so no memory limit" >&2 ;; esac
+# When the proxy inspects GitHub, tools in the sandbox must trust its CA for those hosts. The
+# bundle keeps the public roots first, so everything else still verifies against the real chain.
+if [ "$PROXY_INSPECT" != none ]; then
+  ARGS+=( -v "$CA_PUB":/etc/agent-sandbox/ca:ro
+          -e SSL_CERT_FILE=/etc/agent-sandbox/ca/ca-bundle.pem
+          -e CURL_CA_BUNDLE=/etc/agent-sandbox/ca/ca-bundle.pem
+          -e GIT_SSL_CAINFO=/etc/agent-sandbox/ca/ca-bundle.pem
+          -e REQUESTS_CA_BUNDLE=/etc/agent-sandbox/ca/ca-bundle.pem
+          -e PIP_CERT=/etc/agent-sandbox/ca/ca-bundle.pem
+          -e NODE_EXTRA_CA_CERTS=/etc/agent-sandbox/ca/ca.pem )
+fi
 [ "$GPU" = 1 ]    && ARGS+=( --device nvidia.com/gpu=all )
 [ "$GVISOR" = 1 ] && ARGS+=( --runtime=runsc )
 if [ "$PERF" = 1 ]; then

@@ -143,6 +143,8 @@ done
 
 say "Building images (base: $BASE_IMAGE)"
 podman build -t localhost/agent-proxy  -f "$HERE/container/Containerfile.proxy" "$HERE/container"
+# Running proxies keep the old image until recreated; the next agent-run.sh starts fresh ones.
+podman rm -f agent-proxy agent-proxy-untrusted agent-proxy-audit >/dev/null 2>&1 || true
 podman build -t localhost/agent-claude -f "$HERE/container/Containerfile.agent" \
        --build-arg BASE_IMAGE="$BASE_IMAGE" "$HERE/container"
 

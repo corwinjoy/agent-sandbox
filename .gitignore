@@ -9,3 +9,4 @@ slides/node_modules/
 slides/*.pptx
 slides/*.pdf
 slides/package*.json
+slides/.~lock*#
