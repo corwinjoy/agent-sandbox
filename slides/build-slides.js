@@ -48,7 +48,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   const s = slide(true);
   boundary(s, 0.5, 0.5, 9, 4.6, TEAL);
   s.addText("Agent Sandboxing", tb({ x: 1.0, y: 1.45, w: 8, h: 0.9, fontSize: 42, bold: true, color: PAPER }));
-  s.addText("Why approving prompts is not a security boundary, and the sandbox I ended up building", tb({ x: 1.0, y: 2.45, w: 7.4, h: 0.9, fontSize: 18, color: "B8C4D0" }));
+  s.addText("Why approving prompts is not a security boundary,\nand the sandbox I ended up building", tb({ x: 1.0, y: 2.45, w: 7.4, h: 0.9, fontSize: 18, color: "B8C4D0" }));
   s.addText("Corwin Joy", tb({ x: 1.0, y: 4.0, w: 5, h: 0.35, fontSize: 14, color: PAPER }));
   s.addText("github.com/corwinjoy/agent-sandbox", tb({ x: 1.0, y: 4.35, w: 6, h: 0.35, fontSize: 14, color: AMBER }));
   s.addNotes("This is the story of how I went from 'I will just approve each command' to running my coding agent inside a container with no route to the internet and a token that works on one repository. The dashed outline you will see on most slides stands for a boundary.");
