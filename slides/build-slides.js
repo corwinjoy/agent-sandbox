@@ -60,7 +60,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   heading(s, "1. Understand the agent attack surface", "A coding agent acts with your privileges in three places.");
   const cols = [
     ["Local system", "Everything your user can read or run.", ["Source, SSH keys, cloud credentials, browser profiles", "Shell startup files and PATH", "The kernel and the GPU driver underneath"]],
-    ["Services", "Everything your tokens can do.", ["GitHub, cloud APIs, package registries", "MCP servers and the tools they expose", "One broad token reaches every repository"]],
+    ["Services", "Everything your tokens can do.", ["GitHub, cloud APIs, package registries", "MCP servers and the tools they expose", "Principle of least privilege!"]],
     ["Generated code", "Everything it writes, installs and runs.", ["Code it wrote a minute ago, run without review", "Dependencies and their install scripts", "Build files you run later on the host"]],
   ];
   cols.forEach((c, i) => {
@@ -92,6 +92,13 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
     s.addText(r[2], tb({ x: 3.3, y: y + 0.12, w: 2.7, h: 0.85, fontSize: 11.5, color: INK, valign: "middle" }));
     s.addText(r[3], tb({ x: 6.2, y: y + 0.12, w: 3.15, h: 0.85, fontSize: 11, italic: true, color: MUTED, valign: "middle" }));
   });
+  const src = [
+    ["Bruniaux, Claude Code attack surface", "https://www.florian.bruniaux.com/guides/claude-code-attack-surface/"],
+    ["Ona, how Claude Code escapes its sandbox", "https://ona.com/stories/how-claude-code-escapes-its-own-denylist-and-sandbox"],
+    ["Invariant Labs, GitHub MCP exploited", "https://invariantlabs.ai/blog/mcp-github-vulnerability"],
+  ];
+  s.addText(src.flatMap((l, i) => [{ text: l[0], options: { hyperlink: { url: l[1] }, color: TEAL } }].concat(i < src.length - 1 ? [{ text: "   |   ", options: { color: MUTED } }] : [])),
+    tb({ x: 0.5, y: 5.2, w: 8.4, h: 0.28, fontSize: 9.5, color: TEAL }));
   s.addNotes("Bad hooks: repository config is code, and a headless run never even shows a trust dialog. Overeager AI: the model is trying to help, so a blocked command becomes a puzzle to solve. Malicious prompts: anything the agent reads can steer it, and a well-aligned model did not save the GitHub MCP demo.");
 }
 
@@ -100,7 +107,7 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   const s = slide(true);
   s.addText("3.", tb({ x: 0.5, y: 0.45, w: 1, h: 0.5, fontSize: 20, bold: true, color: AMBER }));
   s.addText("Governing this by approving prompts is a recipe for failure.", tb({ x: 0.5, y: 1.0, w: 5.2, h: 2.6, fontSize: 34, bold: true, color: PAPER }));
-  s.addText("A prompt asks a tired human to judge a command written by the thing being judged.", tb({ x: 0.5, y: 3.85, w: 5.0, h: 0.9, fontSize: 15, italic: true, color: "B8C4D0" }));
+  s.addText("Just click yes!", tb({ x: 0.5, y: 3.85, w: 5.0, h: 0.9, fontSize: 15, italic: true, color: "B8C4D0" }));
   const ev = [
     ["Approval fatigue", "Dozens of prompts a session train you to click yes. The dangerous one looks like the rest."],
     ["An honest ask still gets through", "Ona's agent wrote \"run npx via full path to bypass deny rule\" in the prompt. It was lost among the others."],
