@@ -275,16 +275,17 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   const no = [
     ["No hardware perf counters", "Its seccomp filter denies perf_event_open, with no policy switch."],
     ["Podman 5 or the Docker socket", "Ubuntu 24.04 ships Podman 4.9; the Docker driver needs root-equivalent access."],
-    ["Alpha, API-key login, hooks still run", "Pre-0.1.0 changes; no subscription login documented; nothing Claude-Code-specific."],
+    ["A cloned repo's hooks and MCP servers still run", "Nothing Claude-Code-specific in its base image: no managed settings. .claude hooks and .mcp.json servers start inside the workload, contained but not blocked. This project stops them from starting, and has a test to prove it."],
   ];
   no.forEach((r, i) => {
     const y = 1.9 + i * 0.92;
-    card(s, 5.1, y, 4.4, 0.82, "FBEDEA");
+    const h = i === 2 ? 1.15 : 0.82;
+    card(s, 5.1, y, 4.4, h, "FBEDEA");
     s.addText(r[0], tb({ x: 5.3, y: y + 0.08, w: 4.0, h: 0.26, fontSize: 12.5, bold: true, color: INK }));
-    s.addText(r[1], tb({ x: 5.3, y: y + 0.34, w: 4.0, h: 0.45, fontSize: 10.5, color: INK }));
+    s.addText(r[1], tb({ x: 5.3, y: y + 0.34, w: 4.0, h: h - 0.38, fontSize: 10.5, color: INK }));
   });
-  s.addText("Borrowed: read-only GitHub enforced at the proxy in untrusted mode, and an audit-then-enforce workflow for the allowlist.", tb({ x: 0.5, y: 4.75, w: 9, h: 0.4, fontSize: 11.5, italic: true, color: MUTED }));
-  s.addNotes("OpenShell is NVIDIA's open-source agent runtime. Its supervisor sits inside the sandbox and brokers every connect() call, which is how it knows which binary is talking and can keep credentials out of the workload. I would want that design. But it denies perf_event_open outright, needs Podman 5 or the Docker socket, and is alpha. I took two ideas from it instead.");
+  s.addText("Also alpha (pre-0.1.0 changes) with only API-key login documented. Borrowed: read-only GitHub enforced at the proxy in untrusted mode, and an audit-then-enforce workflow for the allowlist.", tb({ x: 0.5, y: 4.92, w: 9, h: 0.45, fontSize: 10.5, italic: true, color: MUTED }));
+  s.addNotes("OpenShell is NVIDIA's open-source agent runtime. Its supervisor sits inside the sandbox and brokers every connect() call, which is how it knows which binary is talking and can keep credentials out of the workload. I would want that design. But it denies perf_event_open outright, needs Podman 5 or the Docker socket, and does nothing about a cloned repository's Claude Code hooks or MCP servers: they run inside its workload, contained by Landlock and binary identity rather than blocked. I took two ideas from it instead.");
 }
 
 // ---------- 10. rootless podman vs docker ----------
