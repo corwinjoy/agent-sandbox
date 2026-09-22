@@ -879,7 +879,7 @@ Checked on one machine: Ubuntu 24.04, kernel 6.8, Podman 4.9.3 (netavark and aar
 | `agent-run.sh --check-token` | Confirmed against a real token: read and push on the target private repository, no other private repository visible, push refused (HTTP 403) on a public repository in the same organisation and on three of the owner's own repositories. Also confirmed: a clear message when no token is stored |
 | `03-claude-settings.sh` | Merge covered by the unit tests, including that it keeps existing settings and that a second run changes nothing. Not applied to a real `~/.claude/settings.json` |
 | `inspect-repo.sh` | Tested against fabricated hostile repositories and a clean one |
-| Automated test suite (`tests/`) | 251 checks pass locally: 52 static, 144 unit, 55 integration. Each suite was shown to fail when the thing it guards was deliberately broken. The integration suite now clones a public repository through the inspecting proxy and confirms a push is refused. In CI the integration job runs a real `01-setup-podman.sh` on an `ubuntu-24.04` runner (Podman 4.9.3, no GPU); the last CI run predates the proxy changes |
+| Automated test suite (`tests/`) | 251 checks pass locally and in GitHub Actions: 52 static, 144 unit, 55 integration. Each suite was shown to fail when the thing it guards was deliberately broken. The integration suite clones a public repository through the inspecting proxy and confirms a push is refused. In CI the integration job runs a real `01-setup-podman.sh` on an `ubuntu-24.04` runner (Podman 4.9.3, no GPU) and passed on the first run after the proxy rewrite, in 69 seconds |
 
 ## Sources
 
