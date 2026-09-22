@@ -392,9 +392,9 @@ function slide(dark) { const s = pres.addSlide(); s.background = { color: dark ?
   s.addText("The project", tb({ x: 1.0, y: 1.1, w: 8, h: 0.4, fontSize: 16, bold: true, color: AMBER }));
   s.addText([{ text: "github.com/corwinjoy/agent-sandbox", options: { hyperlink: { url: "https://github.com/corwinjoy/agent-sandbox" }, color: PAPER } }], tb({ x: 1.0, y: 1.55, w: 8, h: 0.7, fontSize: 30, bold: true }));
   s.addText(bullets([
-    "docs/setup-guide.md: the three stages, daily use, untrusted repositories, alternatives, sources",
-    "scripts/: setup, launcher, token check, repository inspector, hook-blocking test",
-    "tests/: static, unit and integration suites, run by GitHub Actions",
+    "docs/setup-guide.md: setup and usage",
+    "scripts/: setup, daily usage, CI",
+    "tests/: static, unit and integration tests",
   ], { color: "D5DDE6" }), tb({ x: 1.0, y: 2.55, w: 7.8, h: 1.3, fontSize: 13, color: "D5DDE6" }));
   s.addText("Boundaries that hold when nobody is watching.", tb({ x: 1.0, y: 4.2, w: 8, h: 0.4, fontSize: 16, italic: true, color: "B8C4D0" }));
   s.addNotes("Tested on Ubuntu 24.04 with Podman 4.9. Issues and fixes are welcome.");
